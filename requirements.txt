@@ -1,0 +1,11 @@
+streamlit>=1.40,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+matplotlib>=3.8,<4
+mplfinance>=0.12.10b0
+pykrx>=1.0.48
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+lxml>=5
+openpyxl>=3.1,<4
+Pillow>=10
