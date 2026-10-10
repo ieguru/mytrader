@@ -194,8 +194,91 @@ def save_chart_gif(png_bytes, stock_name, analysis_date):
 # =========================================================
 # 종목별 순차 분석
 # =========================================================
+def render_stock_result(result, position):
+    """완료된 종목의 차트와 분석 결과를 표시합니다."""
+    name = result["stock_name"]
+    ticker = result["ticker"]
+    latest = result["latest"]
 
-def run_batch(selected_stocks, start, end, include_investors):
+    st.subheader(f"{position}. {name} ({ticker})")
+
+    st.caption(
+        f'데이터 기준일: {latest["기준일"]} · '
+        f'차트 파일: img/{result["image_filename"]}'
+    )
+
+    price_column, weekly_column, combined_column = st.columns(3)
+
+    price_column.metric(
+        "최근 일봉 종가",
+        f'{latest["종가"]:,.0f}원',
+    )
+
+    weekly_column.metric(
+        "최근 일봉 Weekly 신호",
+        latest["Weekly 신호"],
+    )
+
+    combined_column.metric(
+        "최근 일봉 Weekly+Monthly 신호",
+        latest["Weekly+Monthly 신호"],
+    )
+
+    for message in result["messages"]:
+        st.info(message)
+
+    st.image(
+        result["gif_bytes"],
+        use_container_width=True,
+    )
+
+    st.download_button(
+        f"{name} GIF 다운로드",
+        data=result["gif_bytes"],
+        file_name=result["image_filename"],
+        mime="image/gif",
+        key=f"gif_download_{position}_{ticker}",
+    )
+
+    with st.expander(f"{name} — 최근 신호 / 거래 기록 / 성과"):
+        st.markdown("#### Weekly 단독 신호")
+        st.dataframe(
+            result["weekly_signals"],
+            hide_index=True,
+        )
+
+        st.markdown("#### Weekly+Monthly 결합 신호")
+        st.dataframe(
+            result["combined_signals"],
+            hide_index=True,
+        )
+
+        st.markdown("#### 전략별 성과 — 원본 계산 방식")
+        st.dataframe(
+            result["metrics"],
+            hide_index=True,
+        )
+
+        st.caption(
+            "총수익률은 거래별 수익률의 단순 합계입니다. "
+            "수수료·세금·슬리피지 및 미청산 평가손익은 "
+            "반영되지 않았습니다. 손익비도 원본 계산식입니다."
+        )
+
+        for strategy, trades in result["trades"].items():
+            st.markdown(f"#### {strategy} 거래 기록")
+
+            if trades.empty:
+                st.info("청산 완료된 거래가 없습니다.")
+            else:
+                st.dataframe(
+                    trades,
+                    hide_index=True,
+                )
+
+    st.divider()
+
+def run_batch(selected_stocks, start, end, include_investors, progress_container, results_container):
     results = []
     records = []
 
@@ -211,8 +294,9 @@ def run_batch(selected_stocks, start, end, include_investors):
         ZoneInfo("Asia/Seoul")
     ).strftime("%Y%m%d")
 
-    progress = st.progress(0)
-    status = st.empty()
+    with progress_container:
+        progress = st.progress(0)
+        status = st.empty()
 
     total = len(selected_stocks)
 
@@ -233,6 +317,17 @@ def run_batch(selected_stocks, start, end, include_investors):
                 "상태": "건너뜀",
                 "내용": f"file/{stock_name}.xlsx 없음",
             })
+            
+            # 완료된 결과를 세션에 반영
+            st.session_state["batch_results"] = results
+            st.session_state["batch_records"] = records
+
+            # 전체 분석이 끝나기를 기다리지 않고 즉시 표시
+            with results_container:
+                render_stock_result(
+                    results[-1],
+                    position=len(results),
+                )
 
             progress.progress(index / total)
             continue
@@ -440,126 +535,66 @@ st.warning(
     "백테스트는 검증 전 참고용으로 사용하세요."
 )
 
+# 화면상의 표시 순서를 먼저 정합니다.
+# 이후 run_batch()가 이 영역들에 내용을 추가합니다.
+progress_container = st.container()
+summary_container = st.container()
+results_container = st.container()
+
+batch_started = False
+
 if submitted:
     if not selected_stocks:
         st.error("실행할 종목을 하나 이상 선택하세요.")
+
     elif start > end:
         st.error("시작일은 종료일보다 늦을 수 없습니다.")
+
     else:
+        batch_started = True
+
         run_batch(
-            selected_stocks,
-            start,
-            end,
-            include_investors,
+            selected_stocks=selected_stocks,
+            start=start,
+            end=end,
+            include_investors=include_investors,
+            progress_container=progress_container,
+            results_container=results_container,
         )
 
 records = st.session_state.get("batch_records", [])
 results = st.session_state.get("batch_results", [])
 period = st.session_state.get("batch_period")
 
-if records:
-    record_frame = pd.DataFrame(records)
-
-    with st.expander("실행 내역 — 완료 / 건너뜀 / 실패", expanded=True):
-        st.dataframe(
-            record_frame,
-            hide_index=True,
-            use_container_width=True,
-        )
-
-if not results:
-    st.info(
-        "왼쪽에서 그룹·종목·기간을 선택하고 "
-        "'분석 실행'을 누르세요. "
-        "분석된 차트가 여기에 세로로 표시됩니다."
-    )
-else:
+# 실행이 끝나면 전체 내역을 차트 위쪽에 표시합니다.
+with summary_container:
     if period:
         st.caption(
-            f"현재 표시 결과의 요청 기간: {period[0]} ~ {period[1]} · "
+            f"현재 결과의 요청 기간: {period[0]} ~ {period[1]} · "
             f"분석 완료 {len(results)}개 종목"
         )
 
-    for position, result in enumerate(results, start=1):
-        name = result["stock_name"]
-        ticker = result["ticker"]
-        latest = result["latest"]
-
-        st.subheader(f"{position}. {name} ({ticker})")
-
-        st.caption(
-            f'데이터 기준일: {latest["기준일"]} · '
-            f'차트 파일: img/{result["image_filename"]}'
-        )
-
-        price_column, weekly_column, combined_column = st.columns(3)
-
-        price_column.metric(
-            "최근 일봉 종가",
-            f'{latest["종가"]:,.0f}원',
-        )
-
-        weekly_column.metric(
-            "최근 일봉 Weekly 신호",
-            latest["Weekly 신호"],
-        )
-
-        combined_column.metric(
-            "최근 일봉 Weekly+Monthly 신호",
-            latest["Weekly+Monthly 신호"],
-        )
-
-        for message in result["messages"]:
-            st.info(message)
-
-        # 종목별 차트를 세로로 표시합니다.
-        st.image(
-            result["gif_bytes"],
-            use_container_width=True,
-        )
-
-        st.download_button(
-            f"{name} GIF 다운로드",
-            data=result["gif_bytes"],
-            file_name=result["image_filename"],
-            mime="image/gif",
-            key=f"gif_download_{position}_{ticker}",
-        )
-
-        with st.expander(f"{name} — 최근 신호 / 거래 기록 / 성과"):
-            st.markdown("#### Weekly 단독 신호")
+    if records:
+        with st.expander(
+            "실행 내역 — 완료 / 건너뜀 / 실패",
+            expanded=True,
+        ):
             st.dataframe(
-                result["weekly_signals"],
+                pd.DataFrame(records),
                 hide_index=True,
+                use_container_width=True,
             )
 
-            st.markdown("#### Weekly+Monthly 결합 신호")
-            st.dataframe(
-                result["combined_signals"],
-                hide_index=True,
+# 이번 실행에서 이미 표시한 결과는 다시 그리지 않습니다.
+# 다른 화면 조작으로 재실행된 경우에는 세션 결과를 복원합니다.
+if not batch_started:
+    with results_container:
+        if results:
+            for position, result in enumerate(results, start=1):
+                render_stock_result(result, position)
+        else:
+            st.info(
+                "왼쪽에서 그룹·종목·기간을 선택하고 "
+                "'분석 실행'을 누르세요. "
+                "분석이 완료된 종목부터 차트가 표시됩니다."
             )
-
-            st.markdown("#### 전략별 성과 — 원본 계산 방식")
-            st.dataframe(
-                result["metrics"],
-                hide_index=True,
-            )
-
-            st.caption(
-                "총수익률은 거래별 수익률의 단순 합계입니다. "
-                "수수료·세금·슬리피지 및 미청산 평가손익은 "
-                "반영되지 않았습니다. 손익비도 원본 계산식입니다."
-            )
-
-            for strategy, trades in result["trades"].items():
-                st.markdown(f"#### {strategy} 거래 기록")
-
-                if trades.empty:
-                    st.info("청산 완료된 거래가 없습니다.")
-                else:
-                    st.dataframe(
-                        trades,
-                        hide_index=True,
-                    )
-
-        st.divider()
