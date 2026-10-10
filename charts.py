@@ -21,17 +21,71 @@ _CHART_LOCK = threading.RLock()
 class ChartPlotter:
     """KOSPI 종목 종합 차트 생성 클래스"""
 
-    @staticmethod
     def setup_korean_font():
-        """OS별 한글 폰트 설정"""
+        """Windows / Linux / macOS에서 한글 폰트를 등록합니다."""
+        from pathlib import Path
+        import os
+        import platform
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
+
+        base_dir = Path(__file__).resolve().parent
         system = platform.system()
-        if system == 'Windows':
-            plt.rcParams['font.family'] = 'Malgun Gothic'
-        elif system == 'Darwin':
-            plt.rcParams['font.family'] = 'AppleGothic'
+
+        candidates = []
+
+        # 프로젝트에 포함한 폰트가 있으면 우선 사용
+        candidates.extend([
+            base_dir / "fonts" / "NanumGothic.ttf",
+            base_dir / "fonts" / "NotoSansKR-Regular.ttf",
+        ])
+
+        if system == "Windows":
+            windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+            candidates.extend([
+                windows_dir / "Fonts" / "malgun.ttf",
+                windows_dir / "Fonts" / "malgunbd.ttf",
+            ])
+
+        elif system == "Darwin":
+            candidates.extend([
+                Path("/System/Library/Fonts/Supplemental/AppleGothic.ttf"),
+                Path("/Library/Fonts/AppleGothic.ttf"),
+            ])
+
         else:
-            plt.rcParams['font.family'] = 'DejaVu Sans'
-        plt.rcParams['axes.unicode_minus'] = False
+            # Streamlit Community Cloud / GitHub Actions
+            candidates.extend([
+                Path(
+                    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
+                ),
+                Path(
+                    "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf"
+                ),
+            ])
+
+        for font_path in candidates:
+            if not font_path.is_file():
+                continue
+
+            # 운영체제의 폰트 검색 캐시에 의존하지 않고 직접 등록
+            font_manager.fontManager.addfont(str(font_path))
+
+            font_name = font_manager.FontProperties(
+                fname=str(font_path)
+            ).get_name()
+
+            plt.rcParams["font.family"] = [font_name]
+            plt.rcParams["font.sans-serif"] = [font_name]
+            plt.rcParams["axes.unicode_minus"] = False
+
+            return font_name
+
+        raise RuntimeError(
+            "한글 폰트를 찾지 못했습니다. "
+            "Community Cloud에서는 packages.txt에 fonts-nanum을 추가하거나, "
+            "프로젝트의 fonts 폴더에 NanumGothic.ttf를 넣으세요."
+        )
 
     @staticmethod
     def plot_candlestick(ax, df, width=0.6):
