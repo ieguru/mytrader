@@ -278,11 +278,17 @@ def render_stock_result(result, position):
 
     st.divider()
 
-def run_batch(selected_stocks, start, end, include_investors, progress_container, results_container):
+def run_batch(
+    selected_stocks,
+    start,
+    end,
+    include_investors,
+    progress_container,
+    results_container,
+):
     results = []
     records = []
 
-    # 실행을 시작할 때 이전 화면 결과를 초기화합니다.
     st.session_state["batch_results"] = results
     st.session_state["batch_records"] = records
     st.session_state["batch_period"] = (
@@ -304,31 +310,21 @@ def run_batch(selected_stocks, start, end, include_investors, progress_container
         selected_stocks, start=1
     ):
         status.info(
-            f"[{index}/{total}] {stock_name} ({ticker}) 분석 중..."
+            f"[{index}/{total}] {stock_name} 분석 중입니다."
         )
 
         excel_path = FINANCIAL_DIR / f"{stock_name}.xlsx"
 
-        # 요청에 따라 엑셀이 없으면 해당 종목 전체를 건너뜁니다.
+        # 엑셀이 없는 종목은 기존 요청대로 분석하지 않습니다.
         if not excel_path.is_file():
             records.append({
                 "종목명": stock_name,
                 "종목코드": ticker,
                 "상태": "건너뜀",
-                "내용": f"file/{stock_name}.xlsx 없음",
+                "내용": f"재무 파일 없음: file/{stock_name}.xlsx",
             })
-            
-            # 완료된 결과를 세션에 반영
-            st.session_state["batch_results"] = results
+
             st.session_state["batch_records"] = records
-
-            # 전체 분석이 끝나기를 기다리지 않고 즉시 표시
-            with results_container:
-                render_stock_result(
-                    results[-1],
-                    position=len(results),
-                )
-
             progress.progress(index / total)
             continue
 
@@ -340,14 +336,52 @@ def run_batch(selected_stocks, start, end, include_investors, progress_container
                 include_investors,
             )
 
-            result = analyze_frame(
+            analysis = analyze_frame(
                 frame,
                 stock_name,
                 excel_file=str(excel_path),
             )
 
+            display_result = {
+                "stock_name": stock_name,
+                "ticker": ticker,
+                "latest": analysis["latest"],
+                "metrics": analysis["metrics"],
+                "trades": analysis["trades"],
+                "weekly_signals": recent_signals(
+                    analysis["data"],
+                    combined=False,
+                ),
+                "combined_signals": recent_signals(
+                    analysis["data"],
+                    combined=True,
+                ),
+                "messages": (
+                    list(fetch_messages)
+                    + list(analysis["messages"])
+                ),
+                "gif_bytes": None,
+                "image_filename": None,
+            }
+
+        except Exception as error:
+            records.append({
+                "종목명": stock_name,
+                "종목코드": ticker,
+                "상태": "분석 실패",
+                "내용": str(error),
+            })
+
+            st.session_state["batch_records"] = records
+            progress.progress(index / total)
+            continue
+
+        # 차트 실패가 신호 결과 표시까지 막지 않게 분리합니다.
+        chart_error = None
+
+        try:
             png_bytes = make_chart_png(
-                result["data"],
+                analysis["data"],
                 stock_name,
                 excel_file=str(excel_path),
             )
@@ -358,58 +392,59 @@ def run_batch(selected_stocks, start, end, include_investors, progress_container
                 analysis_date,
             )
 
-            # 전체 일봉 데이터 대신 표시용 결과만 세션에 보관합니다.
-            results.append({
-                "stock_name": stock_name,
-                "ticker": ticker,
-                "latest": result["latest"],
-                "metrics": result["metrics"],
-                "trades": result["trades"],
-                "weekly_signals": recent_signals(
-                    result["data"],
-                    combined=False,
-                ),
-                "combined_signals": recent_signals(
-                    result["data"],
-                    combined=True,
-                ),
-                "messages": fetch_messages + result["messages"],
-                "gif_bytes": gif_bytes,
-                "image_filename": image_path.name,
-            })
-
-            records.append({
-                "종목명": stock_name,
-                "종목코드": ticker,
-                "상태": "완료",
-                "내용": f"img/{image_path.name}",
-            })
+            display_result["gif_bytes"] = gif_bytes
+            display_result["image_filename"] = image_path.name
 
         except Exception as error:
-            # 한 종목의 실패가 전체 분석을 중단하지 않게 합니다.
-            records.append({
-                "종목명": stock_name,
-                "종목코드": ticker,
-                "상태": "실패",
-                "내용": str(error),
-            })
+            chart_error = str(error)
+            display_result["messages"].append(
+                f"차트 생성 또는 저장 실패: {chart_error}"
+            )
+
+        results.append(display_result)
+
+        records.append({
+            "종목명": stock_name,
+            "종목코드": ticker,
+            "상태": (
+                "완료" if chart_error is None
+                else "분석 완료·차트 실패"
+            ),
+            "내용": (
+                f'img/{display_result["image_filename"]}'
+                if chart_error is None
+                else chart_error
+            ),
+        })
+
+        st.session_state["batch_results"] = results
+        st.session_state["batch_records"] = records
+
+        # 다음 종목 분석 전에 이번 종목 결과를 즉시 표시합니다.
+        with results_container:
+            render_stock_result(
+                display_result,
+                position=len(results),
+            )
 
         progress.progress(index / total)
 
-    st.session_state["batch_results"] = results
-    st.session_state["batch_records"] = records
-
-    completed = len(results)
     skipped = sum(
-        record["상태"] == "건너뜀" for record in records
+        row["상태"] == "건너뜀" for row in records
     )
     failed = sum(
-        record["상태"] == "실패" for record in records
+        row["상태"] == "분석 실패" for row in records
+    )
+    chart_failed = sum(
+        row["상태"] == "분석 완료·차트 실패"
+        for row in records
     )
 
-    status.success(
-        f"분석 종료 — 완료 {completed}개 / "
-        f"건너뜀 {skipped}개 / 실패 {failed}개"
+    status.info(
+        f"분석 종료 — 결과 {len(results)}개 / "
+        f"건너뜀 {skipped}개 / "
+        f"분석 실패 {failed}개 / "
+        f"차트 실패 {chart_failed}개"
     )
 
 
@@ -526,17 +561,13 @@ with st.sidebar:
 # =========================================================
 # 오른쪽: 실행 및 결과 표시
 # =========================================================
-
-st.title("📊 MyTrader — 종목별 종합차트")
+st.title("종목별 분석 결과")
 
 st.warning(
-    "기존 신호 계산 로직을 유지한 웹 버전입니다. "
-    "주간·월간 지표의 미래 데이터 참조 위험이 있으므로 "
+    "기존 주간·월간 지표 계산에는 미래 데이터 참조 위험이 있습니다. "
     "백테스트는 검증 전 참고용으로 사용하세요."
 )
 
-# 화면상의 표시 순서를 먼저 정합니다.
-# 이후 run_batch()가 이 영역들에 내용을 추가합니다.
 progress_container = st.container()
 summary_container = st.container()
 results_container = st.container()
@@ -545,7 +576,7 @@ batch_started = False
 
 if submitted:
     if not selected_stocks:
-        st.error("실행할 종목을 하나 이상 선택하세요.")
+        st.error("분석할 종목을 하나 이상 선택하세요.")
 
     elif start > end:
         st.error("시작일은 종료일보다 늦을 수 없습니다.")
@@ -554,47 +585,57 @@ if submitted:
         batch_started = True
 
         run_batch(
-            selected_stocks=selected_stocks,
-            start=start,
-            end=end,
-            include_investors=include_investors,
-            progress_container=progress_container,
-            results_container=results_container,
+            selected_stocks,
+            start,
+            end,
+            include_investors,
+            progress_container,
+            results_container,
         )
 
 records = st.session_state.get("batch_records", [])
 results = st.session_state.get("batch_results", [])
 period = st.session_state.get("batch_period")
 
-# 실행이 끝나면 전체 내역을 차트 위쪽에 표시합니다.
 with summary_container:
     if period:
         st.caption(
-            f"현재 결과의 요청 기간: {period[0]} ~ {period[1]} · "
-            f"분석 완료 {len(results)}개 종목"
+            f"분석 요청 기간: {period[0]} ~ {period[1]} · "
+            f"표시 가능한 결과: {len(results)}개"
         )
 
     if records:
-        with st.expander(
-            "실행 내역 — 완료 / 건너뜀 / 실패",
-            expanded=True,
-        ):
-            st.dataframe(
-                pd.DataFrame(records),
-                hide_index=True,
-                use_container_width=True,
+        st.markdown("### 종목별 실행 내역")
+
+        st.dataframe(
+            pd.DataFrame(records),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        if not results:
+            st.error(
+                "표시할 분석 결과가 없습니다. "
+                "위 실행 내역의 '상태'와 '내용'을 확인하세요."
             )
 
-# 이번 실행에서 이미 표시한 결과는 다시 그리지 않습니다.
-# 다른 화면 조작으로 재실행된 경우에는 세션 결과를 복원합니다.
+            st.info(
+                "모든 종목이 '건너뜀'이면 file 폴더에 "
+                "종목명.xlsx 파일이 있는지 확인하세요. "
+                "파일명의 종목명, 등록 종목명, 엑셀 시트명이 "
+                "정확히 같아야 합니다."
+            )
+
+# 이번 실행에서 이미 표시했으면 중복 표시하지 않습니다.
+# 화면 조작으로 재실행된 경우에는 세션 결과를 다시 표시합니다.
 if not batch_started:
     with results_container:
-        if results:
-            for position, result in enumerate(results, start=1):
-                render_stock_result(result, position)
-        else:
-            st.info(
-                "왼쪽에서 그룹·종목·기간을 선택하고 "
-                "'분석 실행'을 누르세요. "
-                "분석이 완료된 종목부터 차트가 표시됩니다."
-            )
+        for position, result in enumerate(results, start=1):
+            render_stock_result(result, position)
+
+if not records and not results:
+    with results_container:
+        st.info(
+            "왼쪽에서 종목과 기간을 선택한 뒤 "
+            "'분석 실행'을 누르세요."
+        )
