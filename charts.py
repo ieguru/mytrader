@@ -119,7 +119,7 @@ class ChartPlotter:
         ax5 = fig.add_subplot(gs[4], sharex=ax1)
         ChartPlotter.plot_candlestick(ax1, df_2year)
         if '목표가' in df_2year.columns:
-            target_series = pd.to_numeric(df_2year['목표가'], errors='coerce')
+            target_series = (pd.to_numeric(df_2year["목표가"], errors="coerce").clip(lower=0))
             valid_target = target_series.notna()
             if valid_target.any():
                 ax1.plot(df_2year.index[valid_target], target_series[valid_target], color='#ff7f0e', linestyle='--', linewidth=2.0, alpha=0.95, label='목표가')
@@ -158,7 +158,7 @@ class ChartPlotter:
                 df_financial = df_financial.tail(8).reset_index(drop=True)
                 quarters = df_financial['분기'].tolist()
                 operating_income = df_financial['영업이익'].values.astype(float)
-                target_prices = df_financial['목표가'].values.astype(float)
+                target_prices = (pd.to_numeric(df_financial["목표가"], errors="coerce").clip(lower=0).to_numpy(dtype=float))
                 current_prices_by_quarter = []
                 for _, row in df_financial.iterrows():
                     quarter = row['분기']

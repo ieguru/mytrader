@@ -17,6 +17,14 @@ class FinancialDataManager:
         try:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
             
+            # 음수 목표가는 0으로 보정합니다.
+            # 빈 값은 NaN으로 유지합니다.
+            if "목표가" in df.columns:
+                df["목표가"] = (
+                    pd.to_numeric(df["목표가"], errors="coerce")
+                    .clip(lower=0)
+                )
+
             # 분기(분기)를 인덱스로 설정
             if '분기' in df.columns:
                 df.set_index('분기', inplace=True)
@@ -438,10 +446,6 @@ def validate_excel(excel_file, stock_name):
         invalid = financial[column].notna() & numeric.isna()
         if invalid.any():
             raise ValueError(f"'{column}'에는 숫자 또는 빈칸만 입력하세요.")
-
-    target = pd.to_numeric(financial["목표가"], errors="coerce")
-    if (target.dropna() <= 0).any():
-        raise ValueError("목표가는 0보다 커야 합니다.")
 
 
 def analyze_frame(frame, stock_name, excel_file=None):
