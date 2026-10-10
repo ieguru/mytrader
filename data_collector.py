@@ -370,17 +370,7 @@ def fetch_data(ticker, start_date, end_date, include_investors=True):
         )
 
     messages = []
-    investors = None
-
-    if include_investors:
-        investors = DataCollector.fetch_investor_trading(
-            ticker, start_date, end_date
-        )
-        if investors is None or investors.empty:
-            messages.append(
-                "투자자 매매 데이터를 가져오지 못했습니다. "
-                "가격·신호 분석만 진행했습니다."
-            )
+    investors = None   
 
     frame = DataCollector.merge_data(ohlcv, investors)
     if frame is None or frame.empty:
