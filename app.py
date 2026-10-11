@@ -337,6 +337,25 @@ def render_stock_result(result, position):
             "Weekly+Monthly": "주간·월간 결합 전략",
         }
 
+        def profit_color(value):
+            """수익률: 양수 빨간색, 음수 파란색."""
+            if pd.isna(value):
+                return ""
+
+            try:
+                number = float(
+                    str(value).replace(",", "").replace("%", "").strip()
+                )
+            except (TypeError, ValueError):
+                return ""
+
+            if number > 0:
+                return "color: #dc2626; font-weight: bold;"
+            if number < 0:
+                return "color: #2563eb; font-weight: bold;"
+
+            return ""
+
         for strategy, trades in result["trades"].items():
             strategy_name = strategy_names.get(strategy, strategy)
             st.markdown(f"#### {strategy_name} 거래 기록")
@@ -347,8 +366,23 @@ def render_stock_result(result, position):
 
             trade_table = trades.copy()
 
-            if "전략" in trade_table.columns:
-                trade_table = trade_table.drop(columns=["전략"])
+            # 내부 전략 컬럼 제외
+            trade_table = trade_table.drop(
+                columns=["전략"],
+                errors="ignore",
+            )
+
+            # 주간 단독 전략에서만 요청한 컬럼 제외
+            if strategy == "Weekly":
+                trade_table = trade_table.drop(
+                    columns=[
+                        "수익(원)",
+                        "보유기간(일)",
+                        "정산사유",
+                        "청산사유",  # 기존 코드에서 사용한 실제 컬럼명
+                    ],
+                    errors="ignore",
+                )
 
             for column in ("매수일", "매도일"):
                 if column in trade_table.columns:
@@ -357,8 +391,29 @@ def render_stock_result(result, position):
                         errors="coerce",
                     ).dt.strftime("%Y-%m-%d")
 
+            # 가격과 수익률 표시 형식
+            formats = {
+                column: "{:,.0f}"
+                for column in ("매수가", "매도가")
+                if column in trade_table.columns
+            }
+
+            if "수익률(%)" in trade_table.columns:
+                formats["수익률(%)"] = "{:.2f}%"
+
+            styled_table = trade_table.style.format(
+                formats,
+                na_rep="",
+            )
+
+            if "수익률(%)" in trade_table.columns:
+                styled_table = styled_table.map(
+                    profit_color,
+                    subset=["수익률(%)"],
+                )
+
             st.dataframe(
-                trade_table,
+                styled_table,
                 hide_index=True,
                 use_container_width=True,
             )
