@@ -195,27 +195,122 @@ def save_chart_png(png_bytes, stock_name, analysis_date):
 # =========================================================
 
 def korean_signal_table(frame):
+    """최근 신호 테이블의 숫자·색상·기호를 설정합니다."""
     table = frame.copy()
 
+    # 추세 컬럼명을 한글로 변경
     trend_columns = {
         "Daily_Trend": "일간 추세",
         "Weekly_Trend": "주간 추세",
         "Monthly_Trend": "월간 추세",
     }
 
-    trend_names = {
-        1: "상승",
-        -1: "하락",
-        0: "중립",
+    trend_labels = {
+        1: "● 상승",
+        -1: "● 하락",
+        0: "● 중립",
     }
 
     for column in trend_columns:
         if column in table.columns:
             table[column] = (
-                table[column].map(trend_names).fillna("없음")
+                table[column]
+                .map(trend_labels)
+                .fillna("없음")
             )
 
-    return table.rename(columns=trend_columns)
+    table = table.rename(columns=trend_columns)
+
+    # 매수·매도 신호를 화살표로 표시
+    if "신호" in table.columns:
+        table["신호"] = table["신호"].replace({
+            "매수": "↑ 매수",
+            "매도": "↓ 매도",
+        })
+
+    # 숫자 표시 형식 적용을 위해 숫자형으로 변환
+    for column in ("종가", "목표가", "괴리율(%)"):
+        if column in table.columns:
+            table[column] = pd.to_numeric(
+                table[column],
+                errors="coerce",
+            )
+
+    def divergence_color(value):
+        """음수 괴리율은 빨간색."""
+        if pd.isna(value):
+            return ""
+
+        if value < 0:
+            return "color: #dc2626; font-weight: bold;"
+
+        return ""
+
+    def signal_color(value):
+        """매수는 빨간색 위 화살표, 매도는 파란색 아래 화살표."""
+        if value == "↑ 매수":
+            return "color: #dc2626; font-weight: bold;"
+
+        if value == "↓ 매도":
+            return "color: #2563eb; font-weight: bold;"
+
+        return ""
+
+    def trend_color(value):
+        """상승은 빨간색 원, 하락은 파란색 원."""
+        if value == "● 상승":
+            return "color: #dc2626; font-weight: bold;"
+
+        if value == "● 하락":
+            return "color: #2563eb; font-weight: bold;"
+
+        if value == "● 중립":
+            return "color: #6b7280;"
+
+        return ""
+
+    # 종가·목표가: 천 단위 쉼표
+    formats = {
+        column: "{:,.0f}"
+        for column in ("종가", "목표가")
+        if column in table.columns
+    }
+
+    # 괴리율: 소수점 첫째 자리까지
+    if "괴리율(%)" in table.columns:
+        formats["괴리율(%)"] = "{:.1f}%"
+
+    styled_table = table.style.format(
+        formats,
+        na_rep="",
+    )
+
+    if "괴리율(%)" in table.columns:
+        styled_table = styled_table.map(
+            divergence_color,
+            subset=["괴리율(%)"],
+        )
+
+    if "신호" in table.columns:
+        styled_table = styled_table.map(
+            signal_color,
+            subset=["신호"],
+        )
+
+    trend_subset = [
+        column
+        for column in ("일간 추세", "주간 추세", "월간 추세")
+        if column in table.columns
+    ]
+
+    if trend_subset:
+        styled_table = styled_table.map(
+            trend_color,
+            subset=trend_subset,
+        )
+
+    return styled_table
+
 
 
 def korean_metrics_table(frame):
