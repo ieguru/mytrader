@@ -593,11 +593,14 @@ def run_batch(
                 "weekly_signals": recent_signals(
                     analysis["data"],
                     combined=False,
-                ),
+                    limit=5,
+                ).iloc[::-1].reset_index(drop=True),
+
                 "combined_signals": recent_signals(
                     analysis["data"],
                     combined=True,
-                ),
+                    limit=5,
+                ).iloc[::-1].reset_index(drop=True),
                 "messages": (
                     list(fetch_messages)
                     + list(analysis["messages"])
