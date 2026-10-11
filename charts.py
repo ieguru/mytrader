@@ -126,7 +126,7 @@ class ChartPlotter:
         - Weekly+Monthly 매수/매도: Weekly_Trend 방향 + Monthly_Trend 전환 결합 신호
         - 강력 매수 / 적극 매수 / 매수 / 적극 매도 / 매도 등급 마커는 삭제됨
         """
-        specs = [('Weekly_Buy', '^', '#e11d48', 150, 'Weekly 매수', '저가', 0.97), ('Weekly_Sell', 'v', '#2563eb', 150, 'Weekly 매도', '고가', 1.03), ('Weekly_Monthly_Buy', 'D', '#16a34a', 130, 'Weekly+Monthly 매수', '저가', 0.94), ('Weekly_Monthly_Sell', 'X', '#7c3aed', 130, 'Weekly+Monthly 매도', '고가', 1.06)]
+        specs = [('Weekly_Buy', '^', '#e11d48', 100, 'Weekly 매수', '저가', 0.97), ('Weekly_Sell', 'v', '#2563eb', 100, 'Weekly 매도', '고가', 1.03), ('Weekly_Monthly_Buy', 'D', '#16a34a', 130, 'Weekly+Monthly 매수', '저가', 0.94), ('Weekly_Monthly_Sell', 'X', "#9740e8", 130, 'Weekly+Monthly 매도', '고가', 1.06)]
         for col, marker, color, size, label, price_col, factor in specs:
             if col not in df.columns or price_col not in df.columns:
                 continue
