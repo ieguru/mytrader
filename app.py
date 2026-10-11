@@ -2,13 +2,12 @@
 import io
 import os
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-from PIL import Image
 
 from analysis_engine import analyze_frame, recent_signals
 from charts import make_chart_png
@@ -20,7 +19,7 @@ from data_collector import fetch_data
 # =========================================================
 
 st.set_page_config(
-    page_title="MyTrader — 그룹별 종목 분석",
+    page_title="종목별 분석",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -34,25 +33,39 @@ IMAGE_DIR = BASE_DIR / "img"
 TODAY_KST = datetime.now(ZoneInfo("Asia/Seoul")).date()
 YESTERDAY_KST = TODAY_KST - timedelta(days=1)
 
+# 이전 GIF 형식의 세션 결과와 섞이지 않도록 초기화합니다.
+RESULT_SCHEMA = "png-v1"
+
+if st.session_state.get("result_schema") != RESULT_SCHEMA:
+    st.session_state.pop("batch_results", None)
+    st.session_state.pop("batch_records", None)
+    st.session_state.pop("batch_period", None)
+    st.session_state["result_schema"] = RESULT_SCHEMA
+
 
 # =========================================================
-# TXT 종목 목록 읽기
+# 등록 종목 읽기
 # =========================================================
 
 def load_stock_groups(path):
     """
-    형식:
-        [그룹명]
-        종목명,6자리종목코드
+    stocks.txt 형식:
+
+    [반도체]
+    삼성전자,005930
+    SK하이닉스,000660
+
+    [자동차]
+    현대차,005380
     """
     if not path.is_file():
         raise FileNotFoundError(
-            f"종목 목록 파일이 없습니다: {path.name}"
+            f"등록 종목 파일을 찾을 수 없습니다: {path.name}"
         )
 
     groups = {}
-    current_group = None
     registered_codes = {}
+    current_group = None
 
     text = path.read_text(encoding="utf-8-sig")
 
@@ -88,19 +101,18 @@ def load_stock_groups(path):
             )
 
         stock_name, ticker = fields
-
-        # 파일명으로 사용할 수 없는 문자와 경로 이동을 제한합니다.
         invalid_chars = '<>:"/\\|?*'
 
         if (
             not stock_name
             or stock_name in {".", ".."}
-            or any(character in stock_name for character in invalid_chars)
-            or any(ord(character) < 32 for character in stock_name)
+            or any(char in stock_name for char in invalid_chars)
+            or any(ord(char) < 32 for char in stock_name)
             or stock_name.endswith((".", " "))
         ):
             raise ValueError(
-                f"stocks.txt {line_number}행: 사용할 수 없는 종목명입니다."
+                f"stocks.txt {line_number}행: "
+                "파일명으로 사용할 수 없는 종목명입니다."
             )
 
         if not (
@@ -122,15 +134,15 @@ def load_stock_groups(path):
             )
 
         registered_codes[stock_name] = ticker
-        item = (stock_name, ticker)
+        stock_item = (stock_name, ticker)
 
-        if item not in groups[current_group]:
-            groups[current_group].append(item)
+        if stock_item not in groups[current_group]:
+            groups[current_group].append(stock_item)
 
     groups = {
-        name: items
-        for name, items in groups.items()
-        if items
+        group_name: stocks
+        for group_name, stocks in groups.items()
+        if stocks
     }
 
     if not groups:
@@ -140,11 +152,12 @@ def load_stock_groups(path):
 
 
 # =========================================================
-# 데이터 수집 캐시
+# 가격 데이터 캐시
 # =========================================================
 
 @st.cache_data(ttl=3600, show_spinner=False, max_entries=100)
 def cached_fetch(ticker, start_date, end_date, include_investors):
+    """공개 시장 데이터만 캐시합니다."""
     return fetch_data(
         ticker,
         start_date,
@@ -154,129 +167,208 @@ def cached_fetch(ticker, start_date, end_date, include_investors):
 
 
 # =========================================================
-# GIF 변환 및 저장
+# 고해상도 PNG 저장
 # =========================================================
 
-def save_chart_gif(png_bytes, stock_name, analysis_date):
-    """
-    기존 PNG 차트를 실제 GIF 형식으로 변환합니다.
-    동일 종목·동일 날짜의 파일은 덮어씁니다.
-    """
+def save_chart_png(png_bytes, stock_name, analysis_date):
+    """PNG만 저장하며, 동일 종목·동일 날짜 파일은 덮어씁니다."""
+    if not png_bytes:
+        raise ValueError("저장할 차트 이미지가 없습니다.")
+
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-    filename = f"{stock_name}_{analysis_date}.gif"
+    filename = f"{stock_name}_{analysis_date}.png"
     target_path = IMAGE_DIR / filename
-
-    gif_buffer = io.BytesIO()
-
-    with Image.open(io.BytesIO(png_bytes)) as image:
-        rgb_image = image.convert("RGB")
-        try:
-            rgb_image.save(gif_buffer, format="GIF")
-        finally:
-            rgb_image.close()
-
-    gif_bytes = gif_buffer.getvalue()
-
-    # 저장 도중 다른 요청이 불완전한 파일을 읽지 않도록
-    # 임시 파일 작성 후 교체합니다.
     temporary_path = IMAGE_DIR / f".{uuid.uuid4().hex}.tmp"
 
     try:
-        temporary_path.write_bytes(gif_bytes)
+        temporary_path.write_bytes(png_bytes)
         os.replace(temporary_path, target_path)
     finally:
         temporary_path.unlink(missing_ok=True)
 
-    return target_path, gif_bytes
+    return target_path, png_bytes
 
 
 # =========================================================
-# 종목별 순차 분석
+# 한글 표시용 표 변환
 # =========================================================
+
+def korean_signal_table(frame):
+    table = frame.copy()
+
+    trend_columns = {
+        "Daily_Trend": "일간 추세",
+        "Weekly_Trend": "주간 추세",
+        "Monthly_Trend": "월간 추세",
+    }
+
+    trend_names = {
+        1: "상승",
+        -1: "하락",
+        0: "중립",
+    }
+
+    for column in trend_columns:
+        if column in table.columns:
+            table[column] = (
+                table[column].map(trend_names).fillna("없음")
+            )
+
+    return table.rename(columns=trend_columns)
+
+
+def korean_metrics_table(frame):
+    table = frame.copy()
+
+    if "전략" in table.columns:
+        table["전략"] = (
+            table["전략"].astype(str)
+            .str.replace("Weekly+Monthly", "주간·월간", regex=False)
+            .str.replace("Weekly", "주간", regex=False)
+        )
+
+    return table
+
+
+# =========================================================
+# 종목별 결과 표시
+# =========================================================
+
 def render_stock_result(result, position):
-    """완료된 종목의 차트와 분석 결과를 표시합니다."""
     name = result["stock_name"]
     ticker = result["ticker"]
     latest = result["latest"]
 
     st.subheader(f"{position}. {name} ({ticker})")
-
-    st.caption(
-        f'데이터 기준일: {latest["기준일"]} · '
-        f'차트 파일: img/{result["image_filename"]}'
-    )
+    st.caption(f'가격 데이터 기준일: {latest["기준일"]}')
 
     price_column, weekly_column, combined_column = st.columns(3)
 
     price_column.metric(
-        "최근 일봉 종가",
+        "최근 종가",
         f'{latest["종가"]:,.0f}원',
     )
 
     weekly_column.metric(
-        "최근 일봉 Weekly 신호",
+        "주간 신호",
         latest["Weekly 신호"],
     )
 
     combined_column.metric(
-        "최근 일봉 Weekly+Monthly 신호",
+        "주간·월간 결합 신호",
         latest["Weekly+Monthly 신호"],
     )
 
-    for message in result["messages"]:
+    for message in result.get("messages", []):
         st.info(message)
 
-    st.image(
-        result["gif_bytes"],
-        use_container_width=True,
-    )
+    st.markdown("### 최근 매매 신호")
 
-    st.download_button(
-        f"{name} GIF 다운로드",
-        data=result["gif_bytes"],
-        file_name=result["image_filename"],
-        mime="image/gif",
-        key=f"gif_download_{position}_{ticker}",
-    )
+    st.markdown("**주간 단독 신호**")
+    weekly_signals = result["weekly_signals"]
 
-    with st.expander(f"{name} — 최근 신호 / 거래 기록 / 성과"):
-        st.markdown("#### Weekly 단독 신호")
+    if weekly_signals.empty:
+        st.info("해당 기간에 발생한 주간 매매 신호가 없습니다.")
+    else:
         st.dataframe(
-            result["weekly_signals"],
+            korean_signal_table(weekly_signals),
             hide_index=True,
+            use_container_width=True,
         )
 
-        st.markdown("#### Weekly+Monthly 결합 신호")
+    st.markdown("**주간·월간 결합 신호**")
+    combined_signals = result["combined_signals"]
+
+    if combined_signals.empty:
+        st.info("해당 기간에 발생한 주간·월간 결합 신호가 없습니다.")
+    else:
         st.dataframe(
-            result["combined_signals"],
+            korean_signal_table(combined_signals),
             hide_index=True,
+            use_container_width=True,
         )
 
-        st.markdown("#### 전략별 성과 — 원본 계산 방식")
-        st.dataframe(
-            result["metrics"],
-            hide_index=True,
+    st.markdown("### 종합차트")
+
+    png_bytes = result.get("png_bytes")
+
+    if png_bytes:
+        st.image(
+            png_bytes,
+            use_container_width=True,
         )
 
         st.caption(
-            "총수익률은 거래별 수익률의 단순 합계입니다. "
-            "수수료·세금·슬리피지 및 미청산 평가손익은 "
-            "반영되지 않았습니다. 손익비도 원본 계산식입니다."
+            f'저장 위치: img/{result["image_filename"]}'
         )
 
+        st.download_button(
+            f"{name} 고해상도 차트 다운로드",
+            data=png_bytes,
+            file_name=result["image_filename"],
+            mime="image/png",
+            key=f"chart_{position}_{ticker}",
+        )
+    else:
+        st.warning(
+            "종합차트를 생성하거나 저장하지 못했습니다. "
+            "최근 신호와 거래 기록은 확인할 수 있습니다."
+        )
+
+    with st.expander("전략별 성과와 거래 기록 보기", expanded=True):
+        st.markdown("#### 전략별 성과")
+
+        st.dataframe(
+            korean_metrics_table(result["metrics"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        st.caption(
+            "기존 백테스트 계산 방식입니다. "
+            "총수익률은 거래별 수익률의 단순 합계이며 "
+            "수수료·세금·슬리피지 및 미청산 평가손익은 제외됩니다. "
+            "손익비도 기존 계산식입니다."
+        )
+
+        strategy_names = {
+            "Weekly": "주간 단독 전략",
+            "Weekly+Monthly": "주간·월간 결합 전략",
+        }
+
         for strategy, trades in result["trades"].items():
-            st.markdown(f"#### {strategy} 거래 기록")
+            strategy_name = strategy_names.get(strategy, strategy)
+            st.markdown(f"#### {strategy_name} 거래 기록")
 
             if trades.empty:
-                st.info("청산 완료된 거래가 없습니다.")
-            else:
-                st.dataframe(
-                    trades,
-                    hide_index=True,
-                )
+                st.info("청산이 완료된 거래가 없습니다.")
+                continue
+
+            trade_table = trades.copy()
+
+            if "전략" in trade_table.columns:
+                trade_table = trade_table.drop(columns=["전략"])
+
+            for column in ("매수일", "매도일"):
+                if column in trade_table.columns:
+                    trade_table[column] = pd.to_datetime(
+                        trade_table[column],
+                        errors="coerce",
+                    ).dt.strftime("%Y-%m-%d")
+
+            st.dataframe(
+                trade_table,
+                hide_index=True,
+                use_container_width=True,
+            )
 
     st.divider()
+
+
+# =========================================================
+# 종목별 순차 분석
+# =========================================================
 
 def run_batch(
     selected_stocks,
@@ -310,12 +402,11 @@ def run_batch(
         selected_stocks, start=1
     ):
         status.info(
-            f"[{index}/{total}] {stock_name} 분석 중입니다."
+            f"[{index}/{total}] {stock_name} ({ticker}) 분석 중입니다."
         )
 
         excel_path = FINANCIAL_DIR / f"{stock_name}.xlsx"
 
-        # 엑셀이 없는 종목은 기존 요청대로 분석하지 않습니다.
         if not excel_path.is_file():
             records.append({
                 "종목명": stock_name,
@@ -328,6 +419,7 @@ def run_batch(
             progress.progress(index / total)
             continue
 
+        # 분석 실패와 차트 실패를 따로 처리합니다.
         try:
             frame, fetch_messages = cached_fetch(
                 ticker,
@@ -360,7 +452,7 @@ def run_batch(
                     list(fetch_messages)
                     + list(analysis["messages"])
                 ),
-                "gif_bytes": None,
+                "png_bytes": None,
                 "image_filename": None,
             }
 
@@ -376,7 +468,6 @@ def run_batch(
             progress.progress(index / total)
             continue
 
-        # 차트 실패가 신호 결과 표시까지 막지 않게 분리합니다.
         chart_error = None
 
         try:
@@ -386,13 +477,13 @@ def run_batch(
                 excel_file=str(excel_path),
             )
 
-            image_path, gif_bytes = save_chart_gif(
+            image_path, saved_png_bytes = save_chart_png(
                 png_bytes,
                 stock_name,
                 analysis_date,
             )
 
-            display_result["gif_bytes"] = gif_bytes
+            display_result["png_bytes"] = saved_png_bytes
             display_result["image_filename"] = image_path.name
 
         except Exception as error:
@@ -407,7 +498,8 @@ def run_batch(
             "종목명": stock_name,
             "종목코드": ticker,
             "상태": (
-                "완료" if chart_error is None
+                "완료"
+                if chart_error is None
                 else "분석 완료·차트 실패"
             ),
             "내용": (
@@ -420,12 +512,26 @@ def run_batch(
         st.session_state["batch_results"] = results
         st.session_state["batch_records"] = records
 
-        # 다음 종목 분석 전에 이번 종목 결과를 즉시 표시합니다.
-        with results_container:
-            render_stock_result(
-                display_result,
-                position=len(results),
-            )
+        # 완료된 종목부터 바로 표시합니다.
+        # 표시 오류 때문에 이후 종목 분석이 중단되지 않게 합니다.
+        try:
+            with results_container:
+                render_stock_result(
+                    display_result,
+                    position=len(results),
+                )
+        except Exception as error:
+            records[-1]["상태"] = "분석 완료·화면 표시 실패"
+            records[-1]["내용"] = str(error)
+
+            with results_container:
+                st.error(
+                    f"{stock_name} 결과 표시 실패: {error}"
+                )
+
+        # 원본 전체 일봉 데이터는 세션에 보관하지 않습니다.
+        del analysis
+        del frame
 
         progress.progress(index / total)
 
@@ -439,17 +545,22 @@ def run_batch(
         row["상태"] == "분석 완료·차트 실패"
         for row in records
     )
+    display_failed = sum(
+        row["상태"] == "분석 완료·화면 표시 실패"
+        for row in records
+    )
 
     status.info(
         f"분석 종료 — 결과 {len(results)}개 / "
         f"건너뜀 {skipped}개 / "
         f"분석 실패 {failed}개 / "
-        f"차트 실패 {chart_failed}개"
+        f"차트 실패 {chart_failed}개 / "
+        f"화면 표시 실패 {display_failed}개"
     )
 
 
 # =========================================================
-# 종목 목록 로드
+# 등록 종목 불러오기
 # =========================================================
 
 try:
@@ -457,8 +568,8 @@ try:
 except Exception as error:
     st.error(str(error))
     st.info(
-        "프로젝트 폴더에 stocks.txt를 만들고 "
-        "그룹과 종목을 등록하세요."
+        "app.py와 같은 폴더에 stocks.txt를 만들고 "
+        "[그룹명] 아래에 '종목명,종목코드'를 등록하세요."
     )
     st.stop()
 
@@ -468,7 +579,7 @@ except Exception as error:
 # =========================================================
 
 with st.sidebar:
-    st.header("📋 등록 종목")
+    st.header("등록 종목")
 
     group_names = list(stock_groups)
 
@@ -482,10 +593,10 @@ with st.sidebar:
     seen = set()
 
     for group_name in selected_groups:
-        for item in stock_groups[group_name]:
-            if item not in seen:
-                seen.add(item)
-                available_stocks.append(item)
+        for stock_item in stock_groups[group_name]:
+            if stock_item not in seen:
+                seen.add(stock_item)
+                available_stocks.append(stock_item)
 
     st.caption(
         f"전체 {len(stock_groups)}개 그룹 · "
@@ -493,13 +604,11 @@ with st.sidebar:
     )
 
     if available_stocks:
-        registered_table = pd.DataFrame(
-            available_stocks,
-            columns=["종목명", "종목코드"],
-        )
-
         st.dataframe(
-            registered_table,
+            pd.DataFrame(
+                available_stocks,
+                columns=["종목명", "종목코드"],
+            ),
             hide_index=True,
             use_container_width=True,
         )
@@ -537,16 +646,22 @@ with st.sidebar:
         )
 
     st.caption(
-        "종목명.xlsx 파일이 없는 종목은 건너뜁니다. "
+        "재무 파일: file/종목명.xlsx\n\n"
+        "파일이 없는 종목은 건너뜁니다. "
+        "엑셀 시트명은 종목명과 같아야 합니다."
+    )
+
+    st.caption(
+        "필수 엑셀 컬럼: 분기, 목표가, 영업이익\n\n"
         "종료일은 어제까지 선택할 수 있으며 "
-        "장중 네이버 시세는 사용하지 않습니다."
+        "장중 시세는 사용하지 않습니다."
     )
 
     st.divider()
 
     if st.button("가격 데이터 캐시 초기화"):
         cached_fetch.clear()
-        st.success("캐시를 초기화했습니다.")
+        st.success("가격 데이터 캐시를 초기화했습니다.")
 
     if st.button("화면 결과 초기화"):
         st.session_state.pop("batch_results", None)
@@ -554,13 +669,14 @@ with st.sidebar:
         st.session_state.pop("batch_period", None)
 
     st.caption(
-        "화면 결과를 초기화해도 img 폴더의 파일은 삭제하지 않습니다."
+        "화면 결과를 초기화해도 img 폴더의 PNG는 삭제하지 않습니다."
     )
 
 
 # =========================================================
-# 오른쪽: 실행 및 결과 표시
+# 오른쪽: 분석 실행 및 결과 표시
 # =========================================================
+
 st.title("종목별 분석 결과")
 
 st.warning(
@@ -585,12 +701,12 @@ if submitted:
         batch_started = True
 
         run_batch(
-            selected_stocks,
-            start,
-            end,
-            include_investors,
-            progress_container,
-            results_container,
+            selected_stocks=selected_stocks,
+            start=start,
+            end=end,
+            include_investors=include_investors,
+            progress_container=progress_container,
+            results_container=results_container,
         )
 
 records = st.session_state.get("batch_records", [])
@@ -607,8 +723,10 @@ with summary_container:
     if records:
         st.markdown("### 종목별 실행 내역")
 
+        record_table = pd.DataFrame(records)
+
         st.dataframe(
-            pd.DataFrame(records),
+            record_table,
             hide_index=True,
             use_container_width=True,
         )
@@ -616,26 +734,32 @@ with summary_container:
         if not results:
             st.error(
                 "표시할 분석 결과가 없습니다. "
-                "위 실행 내역의 '상태'와 '내용'을 확인하세요."
+                "실행 내역의 '상태'와 '내용'을 확인하세요."
             )
 
             st.info(
                 "모든 종목이 '건너뜀'이면 file 폴더에 "
                 "종목명.xlsx 파일이 있는지 확인하세요. "
-                "파일명의 종목명, 등록 종목명, 엑셀 시트명이 "
-                "정확히 같아야 합니다."
+                "등록 종목명, 엑셀 파일명, 시트명이 정확히 같아야 합니다."
             )
 
-# 이번 실행에서 이미 표시했으면 중복 표시하지 않습니다.
-# 화면 조작으로 재실행된 경우에는 세션 결과를 다시 표시합니다.
+# 이번 실행에서 이미 표시한 결과는 중복 표시하지 않습니다.
+# 다른 화면 조작으로 재실행되면 세션 결과를 복원합니다.
 if not batch_started:
     with results_container:
         for position, result in enumerate(results, start=1):
-            render_stock_result(result, position)
+            try:
+                render_stock_result(result, position)
+            except Exception as error:
+                st.error(
+                    f'{result.get("stock_name", "종목")} '
+                    f"결과 표시 실패: {error}"
+                )
 
 if not records and not results:
     with results_container:
         st.info(
-            "왼쪽에서 종목과 기간을 선택한 뒤 "
-            "'분석 실행'을 누르세요."
+            "왼쪽에서 그룹·종목·기간을 선택하고 "
+            "'분석 실행'을 누르세요. "
+            "분석이 끝난 종목부터 결과가 표시됩니다."
         )

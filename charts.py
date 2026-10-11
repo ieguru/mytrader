@@ -317,7 +317,7 @@ class ChartPlotter:
         return fig
 
 def make_chart_png(df, stock_name, excel_file=None):
-    """파일을 자동 저장하지 않고 메모리에서 차트를 만듭니다."""
+    """종합차트를 고해상도 PNG 데이터로 생성합니다."""
     with _CHART_LOCK:
         try:
             fig = ChartPlotter.generate_chart(
@@ -327,13 +327,26 @@ def make_chart_png(df, stock_name, excel_file=None):
                 save_chart=False,
                 interactive=False,
             )
+
             if fig is None:
                 raise ValueError("차트에 표시할 데이터가 없습니다.")
 
+            # 기존 종합차트 크기 유지
+            fig.set_size_inches(18, 16)
+
             buffer = io.BytesIO()
+
             fig.savefig(
-                buffer, format="png", dpi=120, bbox_inches="tight"
+                buffer,
+                format="png",
+                dpi=300,                 # 기존 120 → 300
+                bbox_inches="tight",
+                facecolor="white",
+                transparent=False,
             )
+
             return buffer.getvalue()
+
         finally:
             plt.close("all")
+
