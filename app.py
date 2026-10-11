@@ -778,7 +778,7 @@ with st.sidebar:
 
         start = st.date_input(
             "시작일",
-            value=YESTERDAY_KST - timedelta(days=365 * 5),
+            value=YESTERDAY_KST - timedelta(days=365 * 4),
             max_value=YESTERDAY_KST,
         )
 
@@ -831,11 +831,6 @@ with st.sidebar:
 # =========================================================
 
 st.title("종목별 분석 결과")
-
-st.warning(
-    "기존 주간·월간 지표 계산에는 미래 데이터 참조 위험이 있습니다. "
-    "백테스트는 검증 전 참고용으로 사용하세요."
-)
 
 progress_container = st.container()
 summary_container = st.container()
