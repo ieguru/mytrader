@@ -38,7 +38,7 @@ OUTPUT_DIR = BASE_DIR / "output"
 LAST_RESULT_FILE = OUTPUT_DIR / "last_analysis.json"
 
 TODAY_KST = datetime.now(ZoneInfo("Asia/Seoul")).date()
-YESTERDAY_KST = TODAY_KST - timedelta(days=1)
+YESTERDAY_KST = TODAY_KST - timedelta(days=0)
 
 # 이전 GIF 형식의 세션 결과와 섞이지 않도록 초기화합니다.
 RESULT_SCHEMA = "png-v1"
