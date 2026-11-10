@@ -1,4 +1,7 @@
-# app.py
+﻿# app.py
+import base64
+import json
+
 import io
 import os
 import uuid
@@ -26,9 +29,13 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+
 STOCKS_FILE = BASE_DIR / "stocks.txt"
 FINANCIAL_DIR = BASE_DIR / "file"
 IMAGE_DIR = BASE_DIR / "img"
+
+OUTPUT_DIR = BASE_DIR / "output"
+LAST_RESULT_FILE = OUTPUT_DIR / "last_analysis.json"
 
 TODAY_KST = datetime.now(ZoneInfo("Asia/Seoul")).date()
 YESTERDAY_KST = TODAY_KST - timedelta(days=1)
@@ -515,6 +522,162 @@ def render_stock_result(result, position):
 
     st.divider()
 
+def dataframe_to_json_data(frame):
+    """데이터프레임을 JSON에 넣을 수 있는 구조로 변환합니다."""
+    return json.loads(
+        frame.to_json(
+            orient="split",
+            date_format="iso",
+            force_ascii=False,
+        )
+    )
+
+
+def json_data_to_dataframe(data):
+    """저장된 표 데이터를 데이터프레임으로 복원합니다."""
+    return pd.read_json(
+        io.StringIO(
+            json.dumps(data, ensure_ascii=False)
+        ),
+        orient="split",
+    )
+
+
+def save_last_analysis(results, records, period):
+    """마지막 분석 결과와 차트를 하나의 파일로 저장합니다."""
+    if not results:
+        # 분석에 전부 실패한 경우 기존 정상 결과는 유지합니다.
+        return
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    saved_results = []
+
+    for result in results:
+        png_bytes = result.get("png_bytes")
+
+        saved_results.append({
+            "stock_name": result["stock_name"],
+            "ticker": result["ticker"],
+            "latest": result["latest"],
+            "messages": result.get("messages", []),
+            "image_filename": result.get("image_filename"),
+
+            "png_base64": (
+                base64.b64encode(png_bytes).decode("ascii")
+                if png_bytes else None
+            ),
+
+            "weekly_signals": dataframe_to_json_data(
+                result["weekly_signals"]
+            ),
+
+            "combined_signals": dataframe_to_json_data(
+                result["combined_signals"]
+            ),
+
+            "metrics": dataframe_to_json_data(
+                result["metrics"]
+            ),
+
+            "trades": {
+                strategy: dataframe_to_json_data(frame)
+                for strategy, frame in result["trades"].items()
+            },
+        })
+
+    saved_at = datetime.now(
+        ZoneInfo("Asia/Seoul")
+    ).isoformat(timespec="seconds")
+
+    payload = {
+        "version": 1,
+        "saved_at": saved_at,
+        "period": list(period),
+        "records": records,
+        "results": saved_results,
+    }
+
+    temporary_path = (
+        OUTPUT_DIR / f".last_analysis_{uuid.uuid4().hex}.tmp"
+    )
+
+    try:
+        temporary_path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+            encoding="utf-8",
+        )
+
+        os.replace(temporary_path, LAST_RESULT_FILE)
+
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+    st.session_state["last_saved_at"] = saved_at
+
+
+def load_last_analysis():
+    """저장된 마지막 결과를 현재 세션으로 복원합니다."""
+    if not LAST_RESULT_FILE.is_file():
+        return False
+
+    payload = json.loads(
+        LAST_RESULT_FILE.read_text(encoding="utf-8")
+    )
+
+    if payload.get("version") != 1:
+        raise ValueError("지원하지 않는 분석 결과 파일 형식입니다.")
+
+    restored_results = []
+
+    for item in payload.get("results", []):
+        encoded_png = item.get("png_base64")
+
+        restored_results.append({
+            "stock_name": item["stock_name"],
+            "ticker": item["ticker"],
+            "latest": item["latest"],
+            "messages": item.get("messages", []),
+            "image_filename": item.get("image_filename"),
+
+            "png_bytes": (
+                base64.b64decode(
+                    encoded_png,
+                    validate=True,
+                )
+                if encoded_png else None
+            ),
+
+            "weekly_signals": json_data_to_dataframe(
+                item["weekly_signals"]
+            ),
+
+            "combined_signals": json_data_to_dataframe(
+                item["combined_signals"]
+            ),
+
+            "metrics": json_data_to_dataframe(
+                item["metrics"]
+            ),
+
+            "trades": {
+                strategy: json_data_to_dataframe(frame_data)
+                for strategy, frame_data in item["trades"].items()
+            },
+        })
+
+    # 복원에 모두 성공한 뒤 세션에 반영합니다.
+    st.session_state["batch_results"] = restored_results
+    st.session_state["batch_records"] = payload.get("records", [])
+    st.session_state["batch_period"] = payload.get("period")
+    st.session_state["last_saved_at"] = payload.get("saved_at")
+
+    return True
+
 
 # =========================================================
 # 종목별 순차 분석
@@ -711,6 +874,36 @@ def run_batch(
         f"화면 표시 실패 {display_failed}개"
     )
 
+    # 분석이 끝나면 최신 결과 저장
+    if results:
+        try:
+            save_last_analysis(
+                results=results,
+                records=records,
+                period=(
+                    start.isoformat(),
+                    end.isoformat(),
+                ),
+            )
+        except Exception as error:
+            with progress_container:
+                st.warning(
+                    f"분석은 완료했으나 결과 저장에 실패했습니다: {error}"
+                )
+
+
+# 새 세션에서 한 번만 마지막 분석 결과를 불러옵니다.
+if not st.session_state.get("last_analysis_checked", False):
+    st.session_state["last_analysis_checked"] = True
+
+    if not st.session_state.get("batch_results"):
+        try:
+            load_last_analysis()
+        except Exception as error:
+            st.warning(
+                f"마지막 분석 결과를 불러오지 못했습니다: {error}"
+            )
+
 
 # =========================================================
 # 등록 종목 불러오기
@@ -778,8 +971,11 @@ with st.sidebar:
 
         start = st.date_input(
             "시작일",
-            value=YESTERDAY_KST - timedelta(days=365 * 4),
-            max_value=YESTERDAY_KST,
+             value=(
+                pd.Timestamp(TODAY_KST)
+                - pd.DateOffset(years=3)
+            ).date(),
+            max_value=TODAY_KST,
         )
 
         end = st.date_input(
@@ -831,6 +1027,17 @@ with st.sidebar:
 # =========================================================
 
 st.title("종목별 분석 결과")
+saved_at = st.session_state.get("last_saved_at")
+
+if saved_at:
+    saved_time = datetime.fromisoformat(saved_at).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    st.caption(
+        f"마지막 분석 저장: {saved_time} (한국 시간)"
+    )
+
 
 progress_container = st.container()
 summary_container = st.container()
