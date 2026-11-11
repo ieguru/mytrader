@@ -342,8 +342,29 @@ def render_stock_result(result, position):
     ticker = result["ticker"]
     latest = result["latest"]
 
+    reference_date = pd.Timestamp(latest["기준일"]).normalize()
+    recent_start = reference_date - pd.Timedelta(days=6)
+
+    weekly_recent = find_recent_signal(
+        result.get("weekly_signals"),
+        reference_date=reference_date,
+        days=7,
+    )
+
+    combined_recent = find_recent_signal(
+        result.get("combined_signals"),
+        reference_date=reference_date,
+        days=7,
+    )
+
     st.subheader(f"{position}. {name} ({ticker})")
     st.caption(f'가격 데이터 기준일: {latest["기준일"]}')
+
+    st.caption(
+        "신호 조회 기간: "
+        f"{recent_start:%Y-%m-%d} ~ {reference_date:%Y-%m-%d}"
+        " · 기준일 포함 최근 7일(달력일)의 마지막 신호"
+    )
 
     price_column, weekly_column, combined_column = st.columns(3)
 
@@ -353,15 +374,28 @@ def render_stock_result(result, position):
     )
 
     weekly_column.metric(
-        "주간 신호",
-        latest["Weekly 신호"],
+        "주간 신호 · 최근 7일",
+        weekly_recent["signal"],
+    )
+
+    weekly_column.caption(
+        f'신호 발생일: {weekly_recent["date"]}'
+        if weekly_recent["date"]
+        else "최근 7일 내 발생한 신호가 없습니다."
     )
 
     combined_column.metric(
-        "주간·월간 결합 신호",
-        latest["Weekly+Monthly 신호"],
+        "주간·월간 결합 신호 · 최근 7일",
+        combined_recent["signal"],
     )
 
+    combined_column.caption(
+        f'신호 발생일: {combined_recent["date"]}'
+        if combined_recent["date"]
+        else "최근 7일 내 발생한 신호가 없습니다."
+    )
+
+    # 아래부터 기존 코드를 그대로 유지하세요.
     for message in result.get("messages", []):
         st.info(message)
 
@@ -521,6 +555,75 @@ def render_stock_result(result, position):
             )
 
     st.divider()
+
+def find_recent_signal(signal_frame, reference_date, days=7):
+    """
+    가격 데이터 기준일을 포함한 최근 days일(달력일)에서
+    가장 최근에 발생한 매수·매도 신호를 반환합니다.
+
+    예: 기준일이 11월 11일이면 11월 5일~11월 11일 조회.
+    """
+    if signal_frame is None or signal_frame.empty:
+        return {
+            "signal": "신호 없음",
+            "date": None,
+        }
+
+    required = {"날짜", "신호"}
+
+    if not required.issubset(signal_frame.columns):
+        return {
+            "signal": "신호 없음",
+            "date": None,
+        }
+
+    reference = pd.Timestamp(reference_date).normalize()
+    start_date = reference - pd.Timedelta(days=days - 1)
+
+    table = signal_frame.copy()
+
+    table["_signal_date"] = pd.to_datetime(
+        table["날짜"],
+        errors="coerce",
+    ).dt.normalize()
+
+    # 표시용 화살표가 붙은 값도 처리합니다.
+    table["_signal"] = (
+        table["신호"]
+        .astype(str)
+        .str.replace("↑", "", regex=False)
+        .str.replace("↓", "", regex=False)
+        .str.strip()
+    )
+
+    mask = (
+        table["_signal_date"].between(
+            start_date,
+            reference,
+            inclusive="both",
+        )
+        & table["_signal"].isin(["매수", "매도"])
+    )
+
+    recent = (
+        table.loc[mask]
+        .sort_values("_signal_date")
+    )
+
+    if recent.empty:
+        return {
+            "signal": "신호 없음",
+            "date": None,
+        }
+
+    latest_signal = recent.iloc[-1]
+
+    return {
+        "signal": latest_signal["_signal"],
+        "date": latest_signal["_signal_date"].strftime("%Y-%m-%d"),
+    }
+
+
 
 def dataframe_to_json_data(frame):
     """데이터프레임을 JSON에 넣을 수 있는 구조로 변환합니다."""
