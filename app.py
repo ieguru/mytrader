@@ -1,8 +1,8 @@
 ﻿# app.py
-import base64
-import json
 
+import base64
 import io
+import json
 import os
 import uuid
 from datetime import datetime, timedelta
@@ -33,20 +33,27 @@ BASE_DIR = Path(__file__).resolve().parent
 STOCKS_FILE = BASE_DIR / "stocks.txt"
 FINANCIAL_DIR = BASE_DIR / "file"
 IMAGE_DIR = BASE_DIR / "img"
-
 OUTPUT_DIR = BASE_DIR / "output"
 LAST_RESULT_FILE = OUTPUT_DIR / "last_analysis.json"
 
 TODAY_KST = datetime.now(ZoneInfo("Asia/Seoul")).date()
-YESTERDAY_KST = TODAY_KST - timedelta(days=0)
+YESTERDAY_KST = TODAY_KST - timedelta(days=1)
 
-# 이전 GIF 형식의 세션 결과와 섞이지 않도록 초기화합니다.
-RESULT_SCHEMA = "png-v1"
+RECENT_SIGNAL_DAYS = 5
+RESULT_SCHEMA = "png-v2-recent5"
+SAVED_RESULT_VERSION = 2
 
+# 이전 형식의 세션 결과와 섞이지 않도록 초기화합니다.
 if st.session_state.get("result_schema") != RESULT_SCHEMA:
-    st.session_state.pop("batch_results", None)
-    st.session_state.pop("batch_records", None)
-    st.session_state.pop("batch_period", None)
+    for key in (
+        "batch_results",
+        "batch_records",
+        "batch_period",
+        "last_saved_at",
+        "last_analysis_checked",
+    ):
+        st.session_state.pop(key, None)
+
     st.session_state["result_schema"] = RESULT_SCHEMA
 
 
@@ -76,7 +83,10 @@ def load_stock_groups(path):
 
     text = path.read_text(encoding="utf-8-sig")
 
-    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+    for line_number, raw_line in enumerate(
+        text.splitlines(),
+        start=1,
+    ):
         line = raw_line.strip()
 
         if not line or line.startswith("#"):
@@ -87,7 +97,8 @@ def load_stock_groups(path):
 
             if not current_group:
                 raise ValueError(
-                    f"stocks.txt {line_number}행: 그룹명이 비어 있습니다."
+                    f"stocks.txt {line_number}행: "
+                    "그룹명이 비어 있습니다."
                 )
 
             groups.setdefault(current_group, [])
@@ -99,7 +110,10 @@ def load_stock_groups(path):
                 "종목 위에 [그룹명]을 먼저 작성하세요."
             )
 
-        fields = [value.strip() for value in line.split(",")]
+        fields = [
+            value.strip()
+            for value in line.split(",")
+        ]
 
         if len(fields) != 2:
             raise ValueError(
@@ -113,8 +127,14 @@ def load_stock_groups(path):
         if (
             not stock_name
             or stock_name in {".", ".."}
-            or any(char in stock_name for char in invalid_chars)
-            or any(ord(char) < 32 for char in stock_name)
+            or any(
+                char in stock_name
+                for char in invalid_chars
+            )
+            or any(
+                ord(char) < 32
+                for char in stock_name
+            )
             or stock_name.endswith((".", " "))
         ):
             raise ValueError(
@@ -134,13 +154,18 @@ def load_stock_groups(path):
 
         previous_code = registered_codes.get(stock_name)
 
-        if previous_code is not None and previous_code != ticker:
+        if (
+            previous_code is not None
+            and previous_code != ticker
+        ):
             raise ValueError(
                 f"stocks.txt {line_number}행: "
-                f"'{stock_name}'에 서로 다른 종목코드가 등록되었습니다."
+                f"'{stock_name}'에 서로 다른 "
+                "종목코드가 등록되었습니다."
             )
 
         registered_codes[stock_name] = ticker
+
         stock_item = (stock_name, ticker)
 
         if stock_item not in groups[current_group]:
@@ -153,7 +178,9 @@ def load_stock_groups(path):
     }
 
     if not groups:
-        raise ValueError("stocks.txt에 등록된 종목이 없습니다.")
+        raise ValueError(
+            "stocks.txt에 등록된 종목이 없습니다."
+        )
 
     return groups
 
@@ -162,8 +189,17 @@ def load_stock_groups(path):
 # 가격 데이터 캐시
 # =========================================================
 
-@st.cache_data(ttl=3600, show_spinner=False, max_entries=100)
-def cached_fetch(ticker, start_date, end_date, include_investors):
+@st.cache_data(
+    ttl=3600,
+    show_spinner=False,
+    max_entries=100,
+)
+def cached_fetch(
+    ticker,
+    start_date,
+    end_date,
+    include_investors,
+):
     """공개 시장 데이터만 캐시합니다."""
     return fetch_data(
         ticker,
@@ -177,20 +213,35 @@ def cached_fetch(ticker, start_date, end_date, include_investors):
 # 고해상도 PNG 저장
 # =========================================================
 
-def save_chart_png(png_bytes, stock_name, analysis_date):
-    """PNG만 저장하며, 동일 종목·동일 날짜 파일은 덮어씁니다."""
+def save_chart_png(
+    png_bytes,
+    stock_name,
+    analysis_date,
+):
+    """동일 종목·동일 날짜 PNG는 덮어씁니다."""
     if not png_bytes:
-        raise ValueError("저장할 차트 이미지가 없습니다.")
+        raise ValueError(
+            "저장할 차트 이미지가 없습니다."
+        )
 
-    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    IMAGE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     filename = f"{stock_name}_{analysis_date}.png"
     target_path = IMAGE_DIR / filename
-    temporary_path = IMAGE_DIR / f".{uuid.uuid4().hex}.tmp"
+
+    temporary_path = (
+        IMAGE_DIR / f".{uuid.uuid4().hex}.tmp"
+    )
 
     try:
         temporary_path.write_bytes(png_bytes)
-        os.replace(temporary_path, target_path)
+        os.replace(
+            temporary_path,
+            target_path,
+        )
     finally:
         temporary_path.unlink(missing_ok=True)
 
@@ -202,10 +253,9 @@ def save_chart_png(png_bytes, stock_name, analysis_date):
 # =========================================================
 
 def korean_signal_table(frame):
-    """최근 신호 테이블의 숫자·색상·기호를 설정합니다."""
+    """최근 신호 표의 숫자·색상·기호를 설정합니다."""
     table = frame.copy()
 
-    # 추세 컬럼명을 한글로 변경
     trend_columns = {
         "Daily_Trend": "일간 추세",
         "Weekly_Trend": "주간 추세",
@@ -226,17 +276,25 @@ def korean_signal_table(frame):
                 .fillna("없음")
             )
 
-    table = table.rename(columns=trend_columns)
+    table = table.rename(
+        columns=trend_columns
+    )
 
-    # 매수·매도 신호를 화살표로 표시
+    # 표에서도 매수·매도를 기호로 표시합니다.
     if "신호" in table.columns:
         table["신호"] = table["신호"].replace({
-            "매수": "↑ 매수",
-            "매도": "↓ 매도",
+            "매수": "↑",
+            "매도": "↓",
+            "신호 없음": "×",
+            "↑ 매수": "↑",
+            "↓ 매도": "↓",
         })
 
-    # 숫자 표시 형식 적용을 위해 숫자형으로 변환
-    for column in ("종가", "목표가", "괴리율(%)"):
+    for column in (
+        "종가",
+        "목표가",
+        "괴리율(%)",
+    ):
         if column in table.columns:
             table[column] = pd.to_numeric(
                 table[column],
@@ -244,46 +302,59 @@ def korean_signal_table(frame):
             )
 
     def divergence_color(value):
-        """음수 괴리율은 빨간색."""
         if pd.isna(value):
             return ""
 
         if value < 0:
-            return "color: #dc2626; font-weight: bold;"
+            return (
+                "color: #dc2626; "
+                "font-weight: bold;"
+            )
 
         return ""
 
     def signal_color(value):
-        """매수는 빨간색 위 화살표, 매도는 파란색 아래 화살표."""
-        if value == "↑ 매수":
-            return "color: #dc2626; font-weight: bold;"
+        if value == "↑":
+            return (
+                "color: #dc2626; "
+                "font-weight: bold;"
+            )
 
-        if value == "↓ 매도":
-            return "color: #2563eb; font-weight: bold;"
+        if value == "↓":
+            return (
+                "color: #2563eb; "
+                "font-weight: bold;"
+            )
+
+        if value == "×":
+            return "color: #9ca3af;"
 
         return ""
 
     def trend_color(value):
-        """상승은 빨간색 원, 하락은 파란색 원."""
         if value == "● 상승":
-            return "color: #dc2626; font-weight: bold;"
+            return (
+                "color: #dc2626; "
+                "font-weight: bold;"
+            )
 
         if value == "● 하락":
-            return "color: #2563eb; font-weight: bold;"
+            return (
+                "color: #2563eb; "
+                "font-weight: bold;"
+            )
 
         if value == "● 중립":
             return "color: #6b7280;"
 
         return ""
 
-    # 종가·목표가: 천 단위 쉼표
     formats = {
         column: "{:,.0f}"
         for column in ("종가", "목표가")
         if column in table.columns
     }
 
-    # 괴리율: 소수점 첫째 자리까지
     if "괴리율(%)" in table.columns:
         formats["괴리율(%)"] = "{:.1f}%"
 
@@ -306,7 +377,11 @@ def korean_signal_table(frame):
 
     trend_subset = [
         column
-        for column in ("일간 추세", "주간 추세", "월간 추세")
+        for column in (
+            "일간 추세",
+            "주간 추세",
+            "월간 추세",
+        )
         if column in table.columns
     ]
 
@@ -319,18 +394,155 @@ def korean_signal_table(frame):
     return styled_table
 
 
-
 def korean_metrics_table(frame):
+    """성과 표의 전략명을 한글로 변환합니다."""
     table = frame.copy()
 
     if "전략" in table.columns:
         table["전략"] = (
-            table["전략"].astype(str)
-            .str.replace("Weekly+Monthly", "주간·월간", regex=False)
-            .str.replace("Weekly", "주간", regex=False)
+            table["전략"]
+            .astype(str)
+            .str.replace(
+                "Weekly+Monthly",
+                "주간·월간",
+                regex=False,
+            )
+            .str.replace(
+                "Weekly",
+                "주간",
+                regex=False,
+            )
         )
 
     return table
+
+
+# =========================================================
+# 상단 신호 표시
+# =========================================================
+
+def render_signal_card(
+    title,
+    signal,
+    signal_date,
+    reference_date,
+):
+    """
+    매수: 빨간 ↑ + 날짜(요일)
+    매도: 파란 ↓ + 날짜(요일)
+    최근 5일 내 신호 없음: 회색 ×
+
+    조회 기준은 오늘이 아니라 가격 데이터 기준일입니다.
+    """
+    st.caption(title)
+
+    parsed_date = pd.to_datetime(
+        signal_date,
+        errors="coerce",
+    )
+
+    reference = pd.to_datetime(
+        reference_date,
+        errors="coerce",
+    )
+
+    valid_signal = (
+        signal in ("매수", "매도")
+        and pd.notna(parsed_date)
+        and pd.notna(reference)
+    )
+
+    if valid_signal:
+        parsed_date = parsed_date.normalize()
+        reference = reference.normalize()
+
+        start_date = (
+            reference
+            - pd.Timedelta(
+                days=RECENT_SIGNAL_DAYS - 1
+            )
+        )
+
+        valid_signal = (
+            start_date
+            <= parsed_date
+            <= reference
+        )
+
+    if not valid_signal:
+        st.markdown(
+            """
+            <div style="
+                min-height: 85px;
+                display: flex;
+                align-items: center;
+                color: #9ca3af;
+                font-size: 56px;
+                font-weight: 800;
+                line-height: 1;
+            ">
+                ×
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
+    if signal == "매수":
+        symbol = "↑"
+        color = "#dc2626"
+    else:
+        symbol = "↓"
+        color = "#2563eb"
+
+    weekdays = (
+        "월",
+        "화",
+        "수",
+        "목",
+        "금",
+        "토",
+        "일",
+    )
+
+    weekday = weekdays[parsed_date.weekday()]
+
+    date_text = (
+        f"{parsed_date:%Y-%m-%d} ({weekday})"
+    )
+
+    st.markdown(
+        f"""
+        <div style="
+            min-height: 85px;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            column-gap: 14px;
+            row-gap: 4px;
+        ">
+            <span style="
+                color: {color};
+                font-size: 64px;
+                font-weight: 900;
+                line-height: 1;
+            ">
+                {symbol}
+            </span>
+
+            <span style="
+                color: {color};
+                font-size: 26px;
+                font-weight: 800;
+                line-height: 1.3;
+                white-space: nowrap;
+            ">
+                {date_text}
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # =========================================================
@@ -342,88 +554,128 @@ def render_stock_result(result, position):
     ticker = result["ticker"]
     latest = result["latest"]
 
-    reference_date = pd.Timestamp(latest["기준일"]).normalize()
-    recent_start = reference_date - pd.Timedelta(days=6)
+    reference_date = pd.Timestamp(
+        latest["기준일"]
+    ).normalize()
 
-    weekly_recent = find_recent_signal(
-        result.get("weekly_signals"),
-        reference_date=reference_date,
-        days=7,
+    signal_start = (
+        reference_date
+        - pd.Timedelta(
+            days=RECENT_SIGNAL_DAYS - 1
+        )
     )
 
-    combined_recent = find_recent_signal(
-        result.get("combined_signals"),
-        reference_date=reference_date,
-        days=7,
+    st.subheader(
+        f"{position}. {name} ({ticker})"
     )
-
-    st.subheader(f"{position}. {name} ({ticker})")
-    st.caption(f'가격 데이터 기준일: {latest["기준일"]}')
 
     st.caption(
-        "신호 조회 기간: "
-        f"{recent_start:%Y-%m-%d} ~ {reference_date:%Y-%m-%d}"
-        " · 기준일 포함 최근 7일(달력일)의 마지막 신호"
+        f'가격 데이터 기준일: {latest["기준일"]}'
     )
 
-    price_column, weekly_column, combined_column = st.columns(3)
-
-    price_column.metric(
-        "최근 종가",
-        f'{latest["종가"]:,.0f}원',
+    st.caption(
+        f"상단 신호 조회 기간: "
+        f"{signal_start:%Y-%m-%d} ~ "
+        f"{reference_date:%Y-%m-%d}"
+        f" · 기준일 포함 최근 {RECENT_SIGNAL_DAYS}일"
+        " · 기간 내 마지막 신호 표시"
     )
 
-    weekly_column.metric(
-        "주간 신호 · 최근 7일",
-        weekly_recent["signal"],
+    price_column, weekly_column, combined_column = (
+        st.columns(3)
     )
 
-    weekly_column.caption(
-        f'신호 발생일: {weekly_recent["date"]}'
-        if weekly_recent["date"]
-        else "최근 7일 내 발생한 신호가 없습니다."
-    )
+    with price_column:
+        st.metric(
+            "최근 종가",
+            f'{latest["종가"]:,.0f}원',
+        )
 
-    combined_column.metric(
-        "주간·월간 결합 신호 · 최근 7일",
-        combined_recent["signal"],
-    )
+    with weekly_column:
+        render_signal_card(
+            title=(
+                f"주간 신호 · 최근 "
+                f"{RECENT_SIGNAL_DAYS}일"
+            ),
+            signal=latest.get(
+                "Weekly 신호",
+                "신호 없음",
+            ),
+            signal_date=latest.get(
+                "Weekly 신호일"
+            ),
+            reference_date=reference_date,
+        )
 
-    combined_column.caption(
-        f'신호 발생일: {combined_recent["date"]}'
-        if combined_recent["date"]
-        else "최근 7일 내 발생한 신호가 없습니다."
-    )
+    with combined_column:
+        render_signal_card(
+            title=(
+                f"주간·월간 결합 신호 · 최근 "
+                f"{RECENT_SIGNAL_DAYS}일"
+            ),
+            signal=latest.get(
+                "Weekly+Monthly 신호",
+                "신호 없음",
+            ),
+            signal_date=latest.get(
+                "Weekly+Monthly 신호일"
+            ),
+            reference_date=reference_date,
+        )
 
-    # 아래부터 기존 코드를 그대로 유지하세요.
     for message in result.get("messages", []):
         st.info(message)
 
+    # -----------------------------------------------------
+    # 최근 신호 표
+    # -----------------------------------------------------
+
     st.markdown("### 최근 매매 신호")
 
+    st.caption(
+        "아래 표는 전체 분석 기간에서 최근 5건을 표시합니다. "
+        "상단의 최근 5일 요약과는 조회 범위가 다릅니다."
+    )
+
     st.markdown("**주간 단독 신호**")
+
     weekly_signals = result["weekly_signals"]
 
     if weekly_signals.empty:
-        st.info("해당 기간에 발생한 주간 매매 신호가 없습니다.")
+        st.info(
+            "해당 기간에 발생한 "
+            "주간 매매 신호가 없습니다."
+        )
     else:
         st.dataframe(
-            korean_signal_table(weekly_signals),
+            korean_signal_table(
+                weekly_signals
+            ),
             hide_index=True,
             use_container_width=True,
         )
 
     st.markdown("**주간·월간 결합 신호**")
+
     combined_signals = result["combined_signals"]
 
     if combined_signals.empty:
-        st.info("해당 기간에 발생한 주간·월간 결합 신호가 없습니다.")
+        st.info(
+            "해당 기간에 발생한 "
+            "주간·월간 결합 신호가 없습니다."
+        )
     else:
         st.dataframe(
-            korean_signal_table(combined_signals),
+            korean_signal_table(
+                combined_signals
+            ),
             hide_index=True,
             use_container_width=True,
         )
+
+    # -----------------------------------------------------
+    # 종합차트
+    # -----------------------------------------------------
 
     st.markdown("### 종합차트")
 
@@ -446,17 +698,27 @@ def render_stock_result(result, position):
             mime="image/png",
             key=f"chart_{position}_{ticker}",
         )
+
     else:
         st.warning(
             "종합차트를 생성하거나 저장하지 못했습니다. "
             "최근 신호와 거래 기록은 확인할 수 있습니다."
         )
 
-    with st.expander("전략별 성과와 거래 기록 보기", expanded=True):
+    # -----------------------------------------------------
+    # 성과 및 거래 기록
+    # -----------------------------------------------------
+
+    with st.expander(
+        "전략별 성과와 거래 기록 보기",
+        expanded=True,
+    ):
         st.markdown("#### 전략별 성과")
 
         st.dataframe(
-            korean_metrics_table(result["metrics"]),
+            korean_metrics_table(
+                result["metrics"]
+            ),
             hide_index=True,
             use_container_width=True,
         )
@@ -464,8 +726,8 @@ def render_stock_result(result, position):
         st.caption(
             "기존 백테스트 계산 방식입니다. "
             "총수익률은 거래별 수익률의 단순 합계이며 "
-            "수수료·세금·슬리피지 및 미청산 평가손익은 제외됩니다. "
-            "손익비도 기존 계산식입니다."
+            "수수료·세금·슬리피지 및 미청산 평가손익은 "
+            "제외됩니다. 손익비도 기존 계산식입니다."
         )
 
         strategy_names = {
@@ -474,60 +736,77 @@ def render_stock_result(result, position):
         }
 
         def profit_color(value):
-            """수익률: 양수 빨간색, 음수 파란색."""
             if pd.isna(value):
                 return ""
 
             try:
                 number = float(
-                    str(value).replace(",", "").replace("%", "").strip()
+                    str(value)
+                    .replace(",", "")
+                    .replace("%", "")
+                    .strip()
                 )
             except (TypeError, ValueError):
                 return ""
 
             if number > 0:
-                return "color: #dc2626; font-weight: bold;"
+                return (
+                    "color: #dc2626; "
+                    "font-weight: bold;"
+                )
+
             if number < 0:
-                return "color: #2563eb; font-weight: bold;"
+                return (
+                    "color: #2563eb; "
+                    "font-weight: bold;"
+                )
 
             return ""
 
         for strategy, trades in result["trades"].items():
-            strategy_name = strategy_names.get(strategy, strategy)
-            st.markdown(f"#### {strategy_name} 거래 기록")
+            strategy_name = strategy_names.get(
+                strategy,
+                strategy,
+            )
+
+            st.markdown(
+                f"#### {strategy_name} 거래 기록"
+            )
 
             if trades.empty:
-                st.info("청산이 완료된 거래가 없습니다.")
+                st.info(
+                    "청산이 완료된 거래가 없습니다."
+                )
                 continue
 
             trade_table = trades.copy()
 
-            # 내부 전략 컬럼 제외
             trade_table = trade_table.drop(
                 columns=["전략"],
                 errors="ignore",
             )
 
-            # 주간 단독 전략에서만 요청한 컬럼 제외
             if strategy == "Weekly":
                 trade_table = trade_table.drop(
                     columns=[
                         "수익(원)",
                         "보유기간(일)",
                         "정산사유",
-                        "청산사유",  # 기존 코드에서 사용한 실제 컬럼명
+                        "청산사유",
                     ],
                     errors="ignore",
                 )
 
             for column in ("매수일", "매도일"):
                 if column in trade_table.columns:
-                    trade_table[column] = pd.to_datetime(
-                        trade_table[column],
-                        errors="coerce",
-                    ).dt.strftime("%Y-%m-%d")
+                    trade_table[column] = (
+                        pd.to_datetime(
+                            trade_table[column],
+                            errors="coerce",
+                        )
+                        .dt.strftime("%Y-%m-%d")
+                    )
 
-            # 가격과 수익률 표시 형식
             formats = {
                 column: "{:,.0f}"
                 for column in ("매수가", "매도가")
@@ -556,77 +835,13 @@ def render_stock_result(result, position):
 
     st.divider()
 
-def find_recent_signal(signal_frame, reference_date, days=7):
-    """
-    가격 데이터 기준일을 포함한 최근 days일(달력일)에서
-    가장 최근에 발생한 매수·매도 신호를 반환합니다.
 
-    예: 기준일이 11월 11일이면 11월 5일~11월 11일 조회.
-    """
-    if signal_frame is None or signal_frame.empty:
-        return {
-            "signal": "신호 없음",
-            "date": None,
-        }
-
-    required = {"날짜", "신호"}
-
-    if not required.issubset(signal_frame.columns):
-        return {
-            "signal": "신호 없음",
-            "date": None,
-        }
-
-    reference = pd.Timestamp(reference_date).normalize()
-    start_date = reference - pd.Timedelta(days=days - 1)
-
-    table = signal_frame.copy()
-
-    table["_signal_date"] = pd.to_datetime(
-        table["날짜"],
-        errors="coerce",
-    ).dt.normalize()
-
-    # 표시용 화살표가 붙은 값도 처리합니다.
-    table["_signal"] = (
-        table["신호"]
-        .astype(str)
-        .str.replace("↑", "", regex=False)
-        .str.replace("↓", "", regex=False)
-        .str.strip()
-    )
-
-    mask = (
-        table["_signal_date"].between(
-            start_date,
-            reference,
-            inclusive="both",
-        )
-        & table["_signal"].isin(["매수", "매도"])
-    )
-
-    recent = (
-        table.loc[mask]
-        .sort_values("_signal_date")
-    )
-
-    if recent.empty:
-        return {
-            "signal": "신호 없음",
-            "date": None,
-        }
-
-    latest_signal = recent.iloc[-1]
-
-    return {
-        "signal": latest_signal["_signal"],
-        "date": latest_signal["_signal_date"].strftime("%Y-%m-%d"),
-    }
-
-
+# =========================================================
+# 결과 직렬화
+# =========================================================
 
 def dataframe_to_json_data(frame):
-    """데이터프레임을 JSON에 넣을 수 있는 구조로 변환합니다."""
+    """DataFrame을 JSON에 넣을 수 있는 구조로 변환합니다."""
     return json.loads(
         frame.to_json(
             orient="split",
@@ -637,22 +852,35 @@ def dataframe_to_json_data(frame):
 
 
 def json_data_to_dataframe(data):
-    """저장된 표 데이터를 데이터프레임으로 복원합니다."""
+    """저장된 표 데이터를 DataFrame으로 복원합니다."""
     return pd.read_json(
         io.StringIO(
-            json.dumps(data, ensure_ascii=False)
+            json.dumps(
+                data,
+                ensure_ascii=False,
+            )
         ),
         orient="split",
     )
 
 
-def save_last_analysis(results, records, period):
-    """마지막 분석 결과와 차트를 하나의 파일로 저장합니다."""
+# =========================================================
+# 마지막 분석 결과 저장
+# =========================================================
+
+def save_last_analysis(
+    results,
+    records,
+    period,
+):
+    """마지막 분석 결과와 PNG를 하나의 파일에 저장합니다."""
     if not results:
-        # 분석에 전부 실패한 경우 기존 정상 결과는 유지합니다.
         return
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     saved_results = []
 
@@ -663,29 +891,33 @@ def save_last_analysis(results, records, period):
             "stock_name": result["stock_name"],
             "ticker": result["ticker"],
             "latest": result["latest"],
-            "messages": result.get("messages", []),
-            "image_filename": result.get("image_filename"),
-
-            "png_base64": (
-                base64.b64encode(png_bytes).decode("ascii")
-                if png_bytes else None
+            "messages": result.get(
+                "messages",
+                [],
             ),
-
+            "image_filename": result.get(
+                "image_filename"
+            ),
+            "png_base64": (
+                base64.b64encode(
+                    png_bytes
+                ).decode("ascii")
+                if png_bytes
+                else None
+            ),
             "weekly_signals": dataframe_to_json_data(
                 result["weekly_signals"]
             ),
-
             "combined_signals": dataframe_to_json_data(
                 result["combined_signals"]
             ),
-
             "metrics": dataframe_to_json_data(
                 result["metrics"]
             ),
-
             "trades": {
                 strategy: dataframe_to_json_data(frame)
-                for strategy, frame in result["trades"].items()
+                for strategy, frame
+                in result["trades"].items()
             },
         })
 
@@ -694,7 +926,8 @@ def save_last_analysis(results, records, period):
     ).isoformat(timespec="seconds")
 
     payload = {
-        "version": 1,
+        "version": SAVED_RESULT_VERSION,
+        "recent_signal_days": RECENT_SIGNAL_DAYS,
         "saved_at": saved_at,
         "period": list(period),
         "records": records,
@@ -702,7 +935,8 @@ def save_last_analysis(results, records, period):
     }
 
     temporary_path = (
-        OUTPUT_DIR / f".last_analysis_{uuid.uuid4().hex}.tmp"
+        OUTPUT_DIR
+        / f".last_analysis_{uuid.uuid4().hex}.tmp"
     )
 
     try:
@@ -715,69 +949,133 @@ def save_last_analysis(results, records, period):
             encoding="utf-8",
         )
 
-        os.replace(temporary_path, LAST_RESULT_FILE)
+        os.replace(
+            temporary_path,
+            LAST_RESULT_FILE,
+        )
 
     finally:
-        temporary_path.unlink(missing_ok=True)
+        temporary_path.unlink(
+            missing_ok=True
+        )
 
     st.session_state["last_saved_at"] = saved_at
 
 
+# =========================================================
+# 마지막 분석 결과 복원
+# =========================================================
+
 def load_last_analysis():
-    """저장된 마지막 결과를 현재 세션으로 복원합니다."""
+    """
+    저장된 결과를 현재 세션으로 복원합니다.
+
+    이전 7일 기준 또는 신호일이 없는 형식은
+    자동 복원하지 않고 재분석하도록 합니다.
+    """
     if not LAST_RESULT_FILE.is_file():
         return False
 
     payload = json.loads(
-        LAST_RESULT_FILE.read_text(encoding="utf-8")
+        LAST_RESULT_FILE.read_text(
+            encoding="utf-8"
+        )
     )
 
-    if payload.get("version") != 1:
-        raise ValueError("지원하지 않는 분석 결과 파일 형식입니다.")
+    if (
+        payload.get("version")
+        != SAVED_RESULT_VERSION
+        or payload.get("recent_signal_days")
+        != RECENT_SIGNAL_DAYS
+    ):
+        st.session_state["restore_notice"] = (
+            "이전 형식의 저장 결과가 있습니다. "
+            "최근 5일 신호를 적용하려면 "
+            "'분석 실행'을 다시 눌러주세요."
+        )
+        return False
 
     restored_results = []
 
     for item in payload.get("results", []):
+        latest = item["latest"]
+
+        required_latest_keys = {
+            "Weekly 신호",
+            "Weekly+Monthly 신호",
+            "Weekly 신호일",
+            "Weekly+Monthly 신호일",
+            "신호 조회 일수",
+        }
+
+        if (
+            not required_latest_keys.issubset(latest)
+            or latest["신호 조회 일수"]
+            != RECENT_SIGNAL_DAYS
+        ):
+            st.session_state["restore_notice"] = (
+                "저장 결과에 최근 5일 신호 정보가 없습니다. "
+                "'분석 실행'을 다시 눌러주세요."
+            )
+            return False
+
         encoded_png = item.get("png_base64")
 
         restored_results.append({
             "stock_name": item["stock_name"],
             "ticker": item["ticker"],
-            "latest": item["latest"],
-            "messages": item.get("messages", []),
-            "image_filename": item.get("image_filename"),
-
+            "latest": latest,
+            "messages": item.get(
+                "messages",
+                [],
+            ),
+            "image_filename": item.get(
+                "image_filename"
+            ),
             "png_bytes": (
                 base64.b64decode(
                     encoded_png,
                     validate=True,
                 )
-                if encoded_png else None
+                if encoded_png
+                else None
             ),
-
             "weekly_signals": json_data_to_dataframe(
                 item["weekly_signals"]
             ),
-
             "combined_signals": json_data_to_dataframe(
                 item["combined_signals"]
             ),
-
             "metrics": json_data_to_dataframe(
                 item["metrics"]
             ),
-
             "trades": {
-                strategy: json_data_to_dataframe(frame_data)
-                for strategy, frame_data in item["trades"].items()
+                strategy: json_data_to_dataframe(
+                    frame_data
+                )
+                for strategy, frame_data
+                in item["trades"].items()
             },
         })
 
-    # 복원에 모두 성공한 뒤 세션에 반영합니다.
-    st.session_state["batch_results"] = restored_results
-    st.session_state["batch_records"] = payload.get("records", [])
-    st.session_state["batch_period"] = payload.get("period")
-    st.session_state["last_saved_at"] = payload.get("saved_at")
+    if not restored_results:
+        return False
+
+    st.session_state["batch_results"] = (
+        restored_results
+    )
+
+    st.session_state["batch_records"] = (
+        payload.get("records", [])
+    )
+
+    st.session_state["batch_period"] = (
+        payload.get("period")
+    )
+
+    st.session_state["last_saved_at"] = (
+        payload.get("saved_at")
+    )
 
     return True
 
@@ -799,9 +1097,20 @@ def run_batch(
 
     st.session_state["batch_results"] = results
     st.session_state["batch_records"] = records
+
     st.session_state["batch_period"] = (
         start.isoformat(),
         end.isoformat(),
+    )
+
+    st.session_state.pop(
+        "last_saved_at",
+        None,
+    )
+
+    st.session_state.pop(
+        "restore_notice",
+        None,
     )
 
     analysis_date = datetime.now(
@@ -815,27 +1124,38 @@ def run_batch(
     total = len(selected_stocks)
 
     for index, (stock_name, ticker) in enumerate(
-        selected_stocks, start=1
+        selected_stocks,
+        start=1,
     ):
         status.info(
-            f"[{index}/{total}] {stock_name} ({ticker}) 분석 중입니다."
+            f"[{index}/{total}] "
+            f"{stock_name} ({ticker}) 분석 중입니다."
         )
 
-        excel_path = FINANCIAL_DIR / f"{stock_name}.xlsx"
+        excel_path = (
+            FINANCIAL_DIR
+            / f"{stock_name}.xlsx"
+        )
 
         if not excel_path.is_file():
             records.append({
                 "종목명": stock_name,
                 "종목코드": ticker,
                 "상태": "건너뜀",
-                "내용": f"재무 파일 없음: file/{stock_name}.xlsx",
+                "내용": (
+                    f"재무 파일 없음: "
+                    f"file/{stock_name}.xlsx"
+                ),
             })
 
             st.session_state["batch_records"] = records
             progress.progress(index / total)
             continue
 
-        # 분석 실패와 차트 실패를 따로 처리합니다.
+        # -------------------------------------------------
+        # 가격 데이터 및 분석
+        # -------------------------------------------------
+
         try:
             frame, fetch_messages = cached_fetch(
                 ticker,
@@ -848,6 +1168,7 @@ def run_batch(
                 frame,
                 stock_name,
                 excel_file=str(excel_path),
+                recent_signal_days=RECENT_SIGNAL_DAYS,
             )
 
             display_result = {
@@ -856,21 +1177,32 @@ def run_batch(
                 "latest": analysis["latest"],
                 "metrics": analysis["metrics"],
                 "trades": analysis["trades"],
-                "weekly_signals": recent_signals(
-                    analysis["data"],
-                    combined=False,
-                    limit=5,
-                ).iloc[::-1].reset_index(drop=True),
 
-                "combined_signals": recent_signals(
-                    analysis["data"],
-                    combined=True,
-                    limit=5,
-                ).iloc[::-1].reset_index(drop=True),
+                "weekly_signals": (
+                    recent_signals(
+                        analysis["data"],
+                        combined=False,
+                        limit=5,
+                    )
+                    .iloc[::-1]
+                    .reset_index(drop=True)
+                ),
+
+                "combined_signals": (
+                    recent_signals(
+                        analysis["data"],
+                        combined=True,
+                        limit=5,
+                    )
+                    .iloc[::-1]
+                    .reset_index(drop=True)
+                ),
+
                 "messages": (
                     list(fetch_messages)
                     + list(analysis["messages"])
                 ),
+
                 "png_bytes": None,
                 "image_filename": None,
             }
@@ -887,6 +1219,10 @@ def run_batch(
             progress.progress(index / total)
             continue
 
+        # -------------------------------------------------
+        # 차트 생성 및 저장
+        # -------------------------------------------------
+
         chart_error = None
 
         try:
@@ -896,19 +1232,28 @@ def run_batch(
                 excel_file=str(excel_path),
             )
 
-            image_path, saved_png_bytes = save_chart_png(
-                png_bytes,
-                stock_name,
-                analysis_date,
+            image_path, saved_png_bytes = (
+                save_chart_png(
+                    png_bytes,
+                    stock_name,
+                    analysis_date,
+                )
             )
 
-            display_result["png_bytes"] = saved_png_bytes
-            display_result["image_filename"] = image_path.name
+            display_result["png_bytes"] = (
+                saved_png_bytes
+            )
+
+            display_result["image_filename"] = (
+                image_path.name
+            )
 
         except Exception as error:
             chart_error = str(error)
+
             display_result["messages"].append(
-                f"차트 생성 또는 저장 실패: {chart_error}"
+                "차트 생성 또는 저장 실패: "
+                f"{chart_error}"
             )
 
         results.append(display_result)
@@ -932,38 +1277,50 @@ def run_batch(
         st.session_state["batch_records"] = records
 
         # 완료된 종목부터 바로 표시합니다.
-        # 표시 오류 때문에 이후 종목 분석이 중단되지 않게 합니다.
         try:
             with results_container:
                 render_stock_result(
                     display_result,
                     position=len(results),
                 )
+
         except Exception as error:
-            records[-1]["상태"] = "분석 완료·화면 표시 실패"
+            records[-1]["상태"] = (
+                "분석 완료·화면 표시 실패"
+            )
+
             records[-1]["내용"] = str(error)
 
             with results_container:
                 st.error(
-                    f"{stock_name} 결과 표시 실패: {error}"
+                    f"{stock_name} 결과 표시 실패: "
+                    f"{error}"
                 )
 
-        # 원본 전체 일봉 데이터는 세션에 보관하지 않습니다.
         del analysis
         del frame
 
         progress.progress(index / total)
 
+    # -----------------------------------------------------
+    # 종료 상태
+    # -----------------------------------------------------
+
     skipped = sum(
-        row["상태"] == "건너뜀" for row in records
+        row["상태"] == "건너뜀"
+        for row in records
     )
+
     failed = sum(
-        row["상태"] == "분석 실패" for row in records
+        row["상태"] == "분석 실패"
+        for row in records
     )
+
     chart_failed = sum(
         row["상태"] == "분석 완료·차트 실패"
         for row in records
     )
+
     display_failed = sum(
         row["상태"] == "분석 완료·화면 표시 실패"
         for row in records
@@ -977,7 +1334,10 @@ def run_batch(
         f"화면 표시 실패 {display_failed}개"
     )
 
-    # 분석이 끝나면 최신 결과 저장
+    # -----------------------------------------------------
+    # 마지막 분석 결과 저장
+    # -----------------------------------------------------
+
     if results:
         try:
             save_last_analysis(
@@ -988,23 +1348,35 @@ def run_batch(
                     end.isoformat(),
                 ),
             )
+
         except Exception as error:
             with progress_container:
                 st.warning(
-                    f"분석은 완료했으나 결과 저장에 실패했습니다: {error}"
+                    "분석은 완료했으나 "
+                    "결과 저장에 실패했습니다: "
+                    f"{error}"
                 )
 
 
-# 새 세션에서 한 번만 마지막 분석 결과를 불러옵니다.
-if not st.session_state.get("last_analysis_checked", False):
+# =========================================================
+# 새 세션에서 마지막 결과 복원
+# =========================================================
+
+if not st.session_state.get(
+    "last_analysis_checked",
+    False,
+):
     st.session_state["last_analysis_checked"] = True
 
     if not st.session_state.get("batch_results"):
         try:
             load_last_analysis()
+
         except Exception as error:
             st.warning(
-                f"마지막 분석 결과를 불러오지 못했습니다: {error}"
+                "마지막 분석 결과를 "
+                "불러오지 못했습니다: "
+                f"{error}"
             )
 
 
@@ -1013,13 +1385,19 @@ if not st.session_state.get("last_analysis_checked", False):
 # =========================================================
 
 try:
-    stock_groups = load_stock_groups(STOCKS_FILE)
+    stock_groups = load_stock_groups(
+        STOCKS_FILE
+    )
+
 except Exception as error:
     st.error(str(error))
+
     st.info(
         "app.py와 같은 폴더에 stocks.txt를 만들고 "
-        "[그룹명] 아래에 '종목명,종목코드'를 등록하세요."
+        "[그룹명] 아래에 "
+        "'종목명,종목코드'를 등록하세요."
     )
+
     st.stop()
 
 
@@ -1049,36 +1427,45 @@ with st.sidebar:
 
     st.caption(
         f"전체 {len(stock_groups)}개 그룹 · "
-        f"선택 그룹 내 {len(available_stocks)}개 종목"
+        f"선택 그룹 내 "
+        f"{len(available_stocks)}개 종목"
     )
 
     if available_stocks:
         st.dataframe(
             pd.DataFrame(
                 available_stocks,
-                columns=["종목명", "종목코드"],
+                columns=[
+                    "종목명",
+                    "종목코드",
+                ],
             ),
             hide_index=True,
             use_container_width=True,
         )
+
     else:
-        st.info("그룹을 하나 이상 선택하세요.")
+        st.info(
+            "그룹을 하나 이상 선택하세요."
+        )
 
     with st.form("batch_analysis_form"):
         selected_stocks = st.multiselect(
             "실행할 종목 — 복수 선택",
             options=available_stocks,
             default=available_stocks,
-            format_func=lambda item: f"{item[0]} ({item[1]})",
+            format_func=lambda item: (
+                f"{item[0]} ({item[1]})"
+            ),
         )
 
         start = st.date_input(
             "시작일",
-             value=(
+            value=(
                 pd.Timestamp(TODAY_KST)
                 - pd.DateOffset(years=3)
             ).date(),
-            max_value=TODAY_KST,
+            max_value=YESTERDAY_KST,
         )
 
         end = st.date_input(
@@ -1109,19 +1496,44 @@ with st.sidebar:
         "장중 시세는 사용하지 않습니다."
     )
 
+    st.caption(
+        f"상단 신호는 가격 데이터 기준일을 포함한 "
+        f"최근 {RECENT_SIGNAL_DAYS}일"
+        "(주말·공휴일 포함) 안에서 "
+        "마지막으로 발생한 신호입니다.\n\n"
+        "빨간 ↑: 매수 / 파란 ↓: 매도 / "
+        "회색 ×: 신호 없음"
+    )
+
     st.divider()
 
     if st.button("가격 데이터 캐시 초기화"):
         cached_fetch.clear()
-        st.success("가격 데이터 캐시를 초기화했습니다.")
+
+        st.success(
+            "가격 데이터 캐시를 초기화했습니다. "
+            "'분석 실행'을 누르면 새로 조회합니다."
+        )
 
     if st.button("화면 결과 초기화"):
-        st.session_state.pop("batch_results", None)
-        st.session_state.pop("batch_records", None)
-        st.session_state.pop("batch_period", None)
+        for key in (
+            "batch_results",
+            "batch_records",
+            "batch_period",
+            "last_saved_at",
+        ):
+            st.session_state.pop(
+                key,
+                None,
+            )
+
+        # 현재 세션에서는 저장 결과를 다시 자동 로드하지 않습니다.
+        st.session_state["last_analysis_checked"] = True
 
     st.caption(
-        "화면 결과를 초기화해도 img 폴더의 PNG는 삭제하지 않습니다."
+        "화면 결과를 초기화해도 "
+        "img 폴더의 PNG와 저장 결과 파일은 "
+        "삭제하지 않습니다."
     )
 
 
@@ -1130,17 +1542,14 @@ with st.sidebar:
 # =========================================================
 
 st.title("종목별 분석 결과")
-saved_at = st.session_state.get("last_saved_at")
 
-if saved_at:
-    saved_time = datetime.fromisoformat(saved_at).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+restore_notice = st.session_state.pop(
+    "restore_notice",
+    None,
+)
 
-    st.caption(
-        f"마지막 분석 저장: {saved_time} (한국 시간)"
-    )
-
+if restore_notice:
+    st.info(restore_notice)
 
 progress_container = st.container()
 summary_container = st.container()
@@ -1150,10 +1559,15 @@ batch_started = False
 
 if submitted:
     if not selected_stocks:
-        st.error("분석할 종목을 하나 이상 선택하세요.")
+        st.error(
+            "분석할 종목을 하나 이상 선택하세요."
+        )
 
     elif start > end:
-        st.error("시작일은 종료일보다 늦을 수 없습니다.")
+        st.error(
+            "시작일은 종료일보다 "
+            "늦을 수 없습니다."
+        )
 
     else:
         batch_started = True
@@ -1167,24 +1581,49 @@ if submitted:
             results_container=results_container,
         )
 
-records = st.session_state.get("batch_records", [])
-results = st.session_state.get("batch_results", [])
-period = st.session_state.get("batch_period")
+records = st.session_state.get(
+    "batch_records",
+    [],
+)
+
+results = st.session_state.get(
+    "batch_results",
+    [],
+)
+
+period = st.session_state.get(
+    "batch_period"
+)
+
+saved_at = st.session_state.get(
+    "last_saved_at"
+)
 
 with summary_container:
+    if saved_at:
+        saved_time = datetime.fromisoformat(
+            saved_at
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        st.caption(
+            f"마지막 분석 저장: "
+            f"{saved_time} (한국 시간)"
+        )
+
     if period:
         st.caption(
-            f"분석 요청 기간: {period[0]} ~ {period[1]} · "
+            f"분석 요청 기간: "
+            f"{period[0]} ~ {period[1]} · "
             f"표시 가능한 결과: {len(results)}개"
         )
 
     if records:
-        st.markdown("### 종목별 실행 내역")
-
-        record_table = pd.DataFrame(records)
+        st.markdown(
+            "### 종목별 실행 내역"
+        )
 
         st.dataframe(
-            record_table,
+            pd.DataFrame(records),
             hide_index=True,
             use_container_width=True,
         )
@@ -1192,22 +1631,32 @@ with summary_container:
         if not results:
             st.error(
                 "표시할 분석 결과가 없습니다. "
-                "실행 내역의 '상태'와 '내용'을 확인하세요."
+                "실행 내역의 '상태'와 "
+                "'내용'을 확인하세요."
             )
 
             st.info(
-                "모든 종목이 '건너뜀'이면 file 폴더에 "
-                "종목명.xlsx 파일이 있는지 확인하세요. "
-                "등록 종목명, 엑셀 파일명, 시트명이 정확히 같아야 합니다."
+                "모든 종목이 '건너뜀'이면 "
+                "file 폴더에 종목명.xlsx 파일이 "
+                "있는지 확인하세요. "
+                "등록 종목명, 엑셀 파일명, 시트명이 "
+                "정확히 같아야 합니다."
             )
 
 # 이번 실행에서 이미 표시한 결과는 중복 표시하지 않습니다.
-# 다른 화면 조작으로 재실행되면 세션 결과를 복원합니다.
+# 다른 화면 조작으로 재실행되면 세션 결과를 표시합니다.
 if not batch_started:
     with results_container:
-        for position, result in enumerate(results, start=1):
+        for position, result in enumerate(
+            results,
+            start=1,
+        ):
             try:
-                render_stock_result(result, position)
+                render_stock_result(
+                    result,
+                    position,
+                )
+
             except Exception as error:
                 st.error(
                     f'{result.get("stock_name", "종목")} '
@@ -1219,5 +1668,6 @@ if not records and not results:
         st.info(
             "왼쪽에서 그룹·종목·기간을 선택하고 "
             "'분석 실행'을 누르세요. "
-            "분석이 끝난 종목부터 결과가 표시됩니다."
+            "분석이 끝난 종목부터 "
+            "결과가 표시됩니다."
         )
