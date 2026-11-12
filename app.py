@@ -41,7 +41,7 @@ YESTERDAY_KST = TODAY_KST - timedelta(days=1)
 
 RECENT_SIGNAL_DAYS = 5
 RESULT_SCHEMA = "png-v2-recent5"
-SAVED_RESULT_VERSION = 2
+SAVED_RESULT_VERSION = 3
 
 # 이전 형식의 세션 결과와 섞이지 않도록 초기화합니다.
 if st.session_state.get("result_schema") != RESULT_SCHEMA:
@@ -420,6 +420,116 @@ def korean_metrics_table(frame):
 # =========================================================
 # 상단 신호 표시
 # =========================================================
+def build_recent_signal_status(data, latest):
+    """
+    분석 데이터에서 최근 5일의 마지막 신호를 직접 조회합니다.
+
+    - 가격 데이터 기준일 포함
+    - 거래일 5일이 아닌 달력일 5일
+    - 매수·매도 신호가 없으면 '신호 없음'
+    """
+    if data is None or data.empty:
+        raise ValueError("신호를 조회할 분석 데이터가 없습니다.")
+
+    required = {
+        "Weekly_Buy",
+        "Weekly_Sell",
+        "Weekly_Monthly_Buy",
+        "Weekly_Monthly_Sell",
+    }
+
+    missing = required - set(data.columns)
+
+    if missing:
+        raise ValueError(
+            "신호 계산에 필요한 컬럼이 없습니다: "
+            + ", ".join(sorted(missing))
+        )
+
+    frame = data.copy()
+
+    frame.index = pd.to_datetime(
+        frame.index,
+        errors="coerce",
+    )
+
+    frame = frame.loc[
+        ~frame.index.isna()
+    ].copy()
+
+    if frame.empty:
+        raise ValueError("분석 데이터에 유효한 날짜가 없습니다.")
+
+    # 시간대가 있으면 한국 날짜로 통일합니다.
+    if frame.index.tz is not None:
+        frame.index = (
+            frame.index
+            .tz_convert("Asia/Seoul")
+            .tz_localize(None)
+        )
+
+    frame.index = frame.index.normalize()
+    frame = frame.sort_index()
+
+    reference = frame.index[-1]
+    start_date = reference - pd.Timedelta(
+        days=RECENT_SIGNAL_DAYS - 1
+    )
+
+    recent = frame.loc[
+        (frame.index >= start_date)
+        & (frame.index <= reference)
+    ]
+
+    def find_last_signal(buy_col, sell_col):
+        mask = (
+            recent[buy_col].eq(1)
+            | recent[sell_col].eq(1)
+        )
+
+        matched = recent.loc[mask]
+
+        if matched.empty:
+            return "신호 없음", None
+
+        last_row = matched.iloc[-1]
+
+        signal = (
+            "매수"
+            if last_row[buy_col] == 1
+            else "매도"
+        )
+
+        signal_date = matched.index[-1].strftime(
+            "%Y-%m-%d"
+        )
+
+        return signal, signal_date
+
+    weekly_signal, weekly_date = find_last_signal(
+        "Weekly_Buy",
+        "Weekly_Sell",
+    )
+
+    combined_signal, combined_date = find_last_signal(
+        "Weekly_Monthly_Buy",
+        "Weekly_Monthly_Sell",
+    )
+
+    status = dict(latest)
+
+    status.update({
+        "기준일": reference.strftime("%Y-%m-%d"),
+        "Weekly 신호": weekly_signal,
+        "Weekly 신호일": weekly_date,
+        "Weekly+Monthly 신호": combined_signal,
+        "Weekly+Monthly 신호일": combined_date,
+        "신호 조회 시작일": start_date.strftime("%Y-%m-%d"),
+        "신호 조회 종료일": reference.strftime("%Y-%m-%d"),
+        "신호 조회 일수": RECENT_SIGNAL_DAYS,
+    })
+
+    return status
 
 def render_signal_card(
     title,
@@ -428,23 +538,36 @@ def render_signal_card(
     reference_date,
 ):
     """
-    매수: 빨간 ↑ + 날짜(요일)
-    매도: 파란 ↓ + 날짜(요일)
+    매수: 빨간 ↑ 날짜(요일)
+    매도: 파란 ↓ 날짜(요일)
     최근 5일 내 신호 없음: 회색 ×
-
-    조회 기준은 오늘이 아니라 가격 데이터 기준일입니다.
     """
     st.caption(title)
 
-    parsed_date = pd.to_datetime(
-        signal_date,
-        errors="coerce",
-    )
+    def normalize_date(value):
+        if value is None:
+            return pd.NaT
 
-    reference = pd.to_datetime(
-        reference_date,
-        errors="coerce",
-    )
+        try:
+            timestamp = pd.Timestamp(value)
+
+            if pd.isna(timestamp):
+                return pd.NaT
+
+            if timestamp.tzinfo is not None:
+                timestamp = (
+                    timestamp
+                    .tz_convert("Asia/Seoul")
+                    .tz_localize(None)
+                )
+
+            return timestamp.normalize()
+
+        except (TypeError, ValueError, OverflowError):
+            return pd.NaT
+
+    parsed_date = normalize_date(signal_date)
+    reference = normalize_date(reference_date)
 
     valid_signal = (
         signal in ("매수", "매도")
@@ -453,37 +576,31 @@ def render_signal_card(
     )
 
     if valid_signal:
-        parsed_date = parsed_date.normalize()
-        reference = reference.normalize()
-
-        start_date = (
-            reference
-            - pd.Timedelta(
-                days=RECENT_SIGNAL_DAYS - 1
-            )
+        start_date = reference - pd.Timedelta(
+            days=RECENT_SIGNAL_DAYS - 1
         )
 
         valid_signal = (
-            start_date
-            <= parsed_date
-            <= reference
+            start_date <= parsed_date <= reference
         )
 
     if not valid_signal:
+        html = (
+            '<div style="'
+            'min-height:85px;'
+            'display:flex;'
+            'align-items:center;'
+            'color:#9ca3af;'
+            'font-size:56px;'
+            'font-weight:800;'
+            'line-height:1;'
+            '">'
+            '×'
+            '</div>'
+        )
+
         st.markdown(
-            """
-            <div style="
-                min-height: 85px;
-                display: flex;
-                align-items: center;
-                color: #9ca3af;
-                font-size: 56px;
-                font-weight: 800;
-                line-height: 1;
-            ">
-                ×
-            </div>
-            """,
+            html,
             unsafe_allow_html=True,
         )
         return
@@ -495,52 +612,42 @@ def render_signal_card(
         symbol = "↓"
         color = "#2563eb"
 
-    weekdays = (
-        "월",
-        "화",
-        "수",
-        "목",
-        "금",
-        "토",
-        "일",
-    )
-
+    weekdays = ("월", "화", "수", "목", "금", "토", "일")
     weekday = weekdays[parsed_date.weekday()]
 
     date_text = (
         f"{parsed_date:%Y-%m-%d} ({weekday})"
     )
 
-    st.markdown(
-        f"""
-        <div style="
-            min-height: 85px;
-            display: flex;
-            align-items: center;
-            flex-wrap: wrap;
-            column-gap: 14px;
-            row-gap: 4px;
-        ">
-            <span style="
-                color: {color};
-                font-size: 64px;
-                font-weight: 900;
-                line-height: 1;
-            ">
-                {symbol}
-            </span>
+    html = (
+        '<div style="'
+        'min-height:85px;'
+        'display:flex;'
+        'align-items:center;'
+        'flex-wrap:wrap;'
+        'column-gap:14px;'
+        'row-gap:4px;'
+        '">'
+        f'<span style="color:{color};'
+        'font-size:64px;'
+        'font-weight:900;'
+        'line-height:1;'
+        '">'
+        f'{symbol}'
+        '</span>'
+        f'<span style="color:{color};'
+        'font-size:26px;'
+        'font-weight:800;'
+        'line-height:1.3;'
+        'white-space:nowrap;'
+        '">'
+        f'{date_text}'
+        '</span>'
+        '</div>'
+    )
 
-            <span style="
-                color: {color};
-                font-size: 26px;
-                font-weight: 800;
-                line-height: 1.3;
-                white-space: nowrap;
-            ">
-                {date_text}
-            </span>
-        </div>
-        """,
+    st.markdown(
+        html,
         unsafe_allow_html=True,
     )
 
@@ -590,7 +697,7 @@ def render_stock_result(result, position):
             "최근 종가",
             f'{latest["종가"]:,.0f}원',
         )
-
+    
     with weekly_column:
         render_signal_card(
             title=(
@@ -1169,6 +1276,19 @@ def run_batch(
                 stock_name,
                 excel_file=str(excel_path),
                 recent_signal_days=RECENT_SIGNAL_DAYS,
+            )
+
+             # 기존 엔진과 호환되도록 추가 인자 없이 분석합니다.
+            analysis = analyze_frame(
+                frame,
+                stock_name,
+                excel_file=str(excel_path),
+            )
+
+            # 상단 표시용 최근 5일 신호는 app.py에서 직접 계산합니다.
+            analysis["latest"] = build_recent_signal_status(
+                data=analysis["data"],
+                latest=analysis["latest"],
             )
 
             display_result = {
