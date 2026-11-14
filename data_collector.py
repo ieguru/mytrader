@@ -1,28 +1,24 @@
 ﻿# data_collector.py
 """
-가격, 투자자 순매수 수량, 공매도 거래 수량,
-대차 체결·상환 수량을 수집합니다.
+가격과 투자자 순매수 수량만 수집합니다.
 
-투자자·공매도:
-    기존 pykrx 조회 사용
+수집 항목:
+    시가, 고가, 저가, 종가, 거래량
+    외국인합계_순매수
+    기관합계_순매수
+    개인_순매수
 
-대차:
-    프로젝트의 loan/종목코드.csv 파일 사용
-    현재 버전은 대차 API 자동조회가 아닙니다.
-
-단위:
-    모든 수량은 주
+공매도 및 대차거래 데이터는 조회하지 않습니다.
 
 주의:
 - import만으로 데이터를 수집하지 않습니다.
 - 조회 실패 및 누락값을 0으로 보정하지 않습니다.
 - 장중 시세를 별도로 합성하지 않습니다.
-- 계정정보를 이 파일에 넣지 않습니다.
+- 인증정보를 이 파일에 넣지 않습니다.
 """
 
 import logging
 import time
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -30,9 +26,6 @@ from pykrx import stock
 
 
 logger = logging.getLogger(__name__)
-
-BASE_DIR = Path(__file__).resolve().parent
-LOAN_DIR = BASE_DIR / "loan"
 
 STOCK_DICT = {}
 
@@ -48,11 +41,6 @@ INVESTOR_COLUMNS = [
     "외국인합계",
     "기관합계",
     "개인",
-]
-
-LOAN_COLUMNS = [
-    "대차체결수량",
-    "대차상환수량",
 ]
 
 
@@ -75,7 +63,6 @@ def _to_numeric(series):
 
 
 def _normalize_frame(frame):
-    """날짜 인덱스, 컬럼명, 정렬을 정리합니다."""
     if (
         frame is None
         or not isinstance(frame, pd.DataFrame)
@@ -158,7 +145,6 @@ def _validate_request(
 
     ticker = ticker.zfill(6)
 
-    # 숫자가 날짜의 나노초로 해석되지 않도록 문자열화
     if isinstance(
         start_date,
         (int, np.integer),
@@ -245,7 +231,7 @@ def _filter_date_range(
 
 
 # =========================================================
-# 데이터 수집 클래스
+# 데이터 수집
 # =========================================================
 
 class DataCollector:
@@ -297,10 +283,10 @@ class DataCollector:
         **kwargs,
     ):
         """
-        일시적 오류와 빈 응답을 재시도합니다.
+        빈 응답과 일시적인 오류를 재시도합니다.
 
-        인증정보가 포함될 수 있는 인자나
-        원본 오류 내용은 출력하지 않습니다.
+        인증정보가 포함될 수 있는 인자와
+        원본 오류 내용은 로그에 출력하지 않습니다.
         """
         retries = max(
             1,
@@ -391,7 +377,7 @@ class DataCollector:
         if include_today_live:
             logger.warning(
                 "별도 장중 시세 합성은 지원하지 않습니다. "
-                "pykrx 일별 데이터만 사용합니다."
+                "pykrx의 일별 데이터만 사용합니다."
             )
 
         ticker, start_date, end_date = (
@@ -529,323 +515,7 @@ class DataCollector:
         return result
 
     # -----------------------------------------------------
-    # 공매도 거래 수량
-    # -----------------------------------------------------
-
-    @staticmethod
-    def fetch_shorting_volume(
-        ticker,
-        start_date,
-        end_date,
-    ):
-        ticker, start_date, end_date = (
-            _validate_request(
-                ticker,
-                start_date,
-                end_date,
-            )
-        )
-
-        fetch_function = getattr(
-            stock,
-            "get_shorting_volume_by_date",
-            None,
-        )
-
-        if fetch_function is None:
-            raise ValueError(
-                "설치된 pykrx에서 공매도 거래량 "
-                "조회 함수를 찾을 수 없습니다."
-            )
-
-        raw = (
-            DataCollector._call_pykrx_safely(
-                fetch_function,
-                start_date,
-                end_date,
-                ticker,
-            )
-        )
-
-        frame = _normalize_frame(
-            raw
-        )
-
-        if frame.empty:
-            return None
-
-        frame = _filter_date_range(
-            frame,
-            start_date,
-            end_date,
-        )
-
-        if frame.empty:
-            return None
-
-        source_column = next(
-            (
-                candidate
-                for candidate in (
-                    "공매도",
-                    "공매도거래량",
-                    "공매도 거래량",
-                )
-                if candidate in frame.columns
-            ),
-            None,
-        )
-
-        if source_column is None:
-            raise ValueError(
-                "공매도 수량 컬럼을 찾지 못했습니다. "
-                "반환 컬럼: "
-                + ", ".join(
-                    map(str, frame.columns)
-                )
-            )
-
-        result = pd.DataFrame(
-            index=frame.index
-        )
-
-        values = _to_numeric(
-            frame[source_column]
-        )
-
-        result["공매도수량"] = (
-            values.where(values >= 0)
-        )
-
-        if (
-            result["공매도수량"]
-            .isna()
-            .all()
-        ):
-            return None
-
-        return result
-
-    # -----------------------------------------------------
-    # 대차 CSV
-    # -----------------------------------------------------
-
-    @staticmethod
-    def fetch_loan_volume(
-        ticker,
-        start_date,
-        end_date,
-    ):
-        """
-        loan/종목코드.csv를 읽습니다.
-
-        필수 컬럼:
-            날짜
-            대차체결수량
-            대차상환수량
-
-        날짜 형식:
-            YYYY-MM-DD 또는 YYYYMMDD
-
-        수량 단위:
-            주
-
-        조회 실패나 빈칸을 0으로 보정하지 않습니다.
-        API 자동조회는 수행하지 않습니다.
-        """
-        ticker, start_date, end_date = (
-            _validate_request(
-                ticker,
-                start_date,
-                end_date,
-            )
-        )
-
-        path = (
-            LOAN_DIR / f"{ticker}.csv"
-        )
-
-        if not path.is_file():
-            return None
-
-        frame = pd.read_csv(
-            path,
-            encoding="utf-8-sig",
-            dtype="string",
-        )
-
-        frame.columns = [
-            str(column).strip()
-            for column in frame.columns
-        ]
-
-        if frame.columns.duplicated().any():
-            raise ValueError(
-                "대차 CSV에 중복된 컬럼이 있습니다."
-            )
-
-        required = {
-            "날짜",
-            "대차체결수량",
-            "대차상환수량",
-        }
-
-        missing = (
-            required - set(frame.columns)
-        )
-
-        if missing:
-            raise ValueError(
-                "대차 CSV 필수 컬럼 누락: "
-                + ", ".join(sorted(missing))
-            )
-
-        if frame.empty:
-            return None
-
-        # 완전히 빈 행만 제외
-        frame = frame.dropna(
-            subset=list(required),
-            how="all",
-        ).copy()
-
-        if frame.empty:
-            return None
-
-        date_text = (
-            frame["날짜"]
-            .astype("string")
-            .str.strip()
-        )
-
-        dates = pd.Series(
-            pd.NaT,
-            index=frame.index,
-            dtype="datetime64[ns]",
-        )
-
-        compact_mask = (
-            date_text
-            .str.fullmatch(r"\d{8}")
-            .fillna(False)
-        )
-
-        dashed_mask = (
-            date_text
-            .str.fullmatch(
-                r"\d{4}-\d{2}-\d{2}"
-            )
-            .fillna(False)
-        )
-
-        dates.loc[compact_mask] = (
-            pd.to_datetime(
-                date_text.loc[compact_mask],
-                format="%Y%m%d",
-                errors="coerce",
-            )
-        )
-
-        dates.loc[dashed_mask] = (
-            pd.to_datetime(
-                date_text.loc[dashed_mask],
-                format="%Y-%m-%d",
-                errors="coerce",
-            )
-        )
-
-        if dates.isna().any():
-            raise ValueError(
-                "대차 CSV 날짜는 YYYY-MM-DD 또는 "
-                "YYYYMMDD 형식이어야 합니다."
-            )
-
-        if dates.duplicated().any():
-            raise ValueError(
-                "대차 CSV에 중복된 날짜가 있습니다. "
-                "종목별·날짜별 한 행으로 정리하세요."
-            )
-
-        result = pd.DataFrame(
-            index=pd.DatetimeIndex(
-                dates.to_numpy()
-            )
-        )
-
-        result.index.name = "날짜"
-
-        for column in LOAN_COLUMNS:
-            original = frame[column]
-
-            converted = _to_numeric(
-                original
-            )
-
-            supplied = (
-                original.notna()
-                & original.str.strip().ne("")
-            )
-
-            invalid = (
-                supplied
-                & converted.isna()
-            )
-
-            if invalid.any():
-                raise ValueError(
-                    f"대차 CSV의 '{column}'에는 "
-                    "숫자 또는 빈칸만 입력하세요."
-                )
-
-            if (
-                converted.dropna() < 0
-            ).any():
-                raise ValueError(
-                    f"대차 CSV의 '{column}'에는 "
-                    "음수를 입력할 수 없습니다."
-                )
-
-            # 주 단위 정수 수량만 허용
-            valid = converted.dropna()
-
-            if (
-                valid.mod(1).ne(0)
-            ).any():
-                raise ValueError(
-                    f"대차 CSV의 '{column}'은 "
-                    "주 단위 정수여야 합니다."
-                )
-
-            # 날짜 인덱스와 원본 행 인덱스의
-            # 자동 정렬을 피하기 위해 배열 대입
-            result[column] = (
-                converted.to_numpy(
-                    dtype=float,
-                    na_value=np.nan,
-                )
-            )
-
-        result = (
-            result
-            .sort_index()
-        )
-
-        result = _filter_date_range(
-            result,
-            start_date,
-            end_date,
-        )
-
-        if (
-            result.empty
-            or result.isna().all().all()
-        ):
-            return None
-
-        return result
-
-    # -----------------------------------------------------
-    # 병합
+    # 가격·투자자 병합
     # -----------------------------------------------------
 
     @staticmethod
@@ -920,15 +590,14 @@ def fetch_data(
     include_investors=True,
 ):
     """
+    가격 및 선택적 투자자 순매수 수량만 반환합니다.
+
+    공매도 API를 호출하지 않습니다.
+    대차 API 또는 대차 CSV를 읽지 않습니다.
+
     Returns:
-        frame: 가격·수급·공매도·대차 DataFrame
-        messages: 안내 및 경고 문자열 리스트
-
-    투자자 데이터:
-        include_investors에 따라 조회
-
-    공매도·대차:
-        투자자 체크와 관계없이 처리
+        frame: pandas.DataFrame
+        messages: 안내 문자열 리스트
     """
     ticker, start_date, end_date = (
         _validate_request(
@@ -972,7 +641,7 @@ def fetch_data(
         )
 
     # -----------------------------------------------------
-    # 2. 투자자
+    # 2. 투자자 순매수 수량
     # -----------------------------------------------------
 
     investors = None
@@ -1008,6 +677,10 @@ def fetch_data(
                 "가격 분석은 계속합니다."
             )
 
+    # -----------------------------------------------------
+    # 3. 병합
+    # -----------------------------------------------------
+
     frame = (
         DataCollector.merge_data(
             ohlcv,
@@ -1040,133 +713,9 @@ def fetch_data(
                     f"{investor} 순매수 수량이 "
                     f"{missing_count}개 날짜에서 "
                     "누락되었습니다. "
-                    "정확한 누적합을 위해 누락 이후 "
-                    "누적값은 표시하지 않습니다."
+                    "누락 이후 정확한 누적 수량은 "
+                    "계산하지 않습니다."
                 )
-
-    # -----------------------------------------------------
-    # 3. 공매도
-    # -----------------------------------------------------
-
-    try:
-        shorting = (
-            DataCollector.fetch_shorting_volume(
-                ticker,
-                start_date,
-                end_date,
-            )
-        )
-
-        if (
-            shorting is not None
-            and not shorting.empty
-        ):
-            frame = frame.join(
-                shorting,
-                how="left",
-            )
-
-            missing_count = int(
-                frame["공매도수량"]
-                .isna()
-                .sum()
-            )
-
-            if missing_count:
-                messages.append(
-                    "공매도 거래 수량이 "
-                    f"{missing_count}개 날짜에서 "
-                    "누락되었습니다. "
-                    "누락값은 실제 0주와 구분합니다."
-                )
-
-        else:
-            messages.append(
-                "공매도 거래 수량을 가져오지 못했습니다. "
-                "KRX 인증, pykrx 버전 및 "
-                "데이터 제공 여부를 확인하세요."
-            )
-
-    except ValueError as error:
-        messages.append(
-            f"공매도 조회 안내: {error}"
-        )
-
-    except Exception:
-        messages.append(
-            "공매도 조회 중 오류가 발생했습니다. "
-            "다른 분석은 계속합니다."
-        )
-
-    # -----------------------------------------------------
-    # 4. 대차 CSV
-    # -----------------------------------------------------
-
-    try:
-        loans = (
-            DataCollector.fetch_loan_volume(
-                ticker,
-                start_date,
-                end_date,
-            )
-        )
-
-        if (
-            loans is not None
-            and not loans.empty
-        ):
-            frame = frame.join(
-                loans,
-                how="left",
-            )
-
-            messages.append(
-                f"대차 수량은 loan/{ticker}.csv에서 "
-                "읽었습니다. 원본 제공처의 수집 범위와 "
-                "단위 및 이용조건을 확인하세요."
-            )
-
-            for column in LOAN_COLUMNS:
-                missing_count = int(
-                    frame[column]
-                    .isna()
-                    .sum()
-                )
-
-                if missing_count:
-                    messages.append(
-                        f"{column}이 "
-                        f"{missing_count}개 가격 데이터 "
-                        "날짜에서 누락되었습니다. "
-                        "누락값은 0으로 보정하지 않습니다."
-                    )
-
-        else:
-            messages.append(
-                "조회 기간의 대차 체결·상환 수량이 없습니다. "
-                f"loan/{ticker}.csv 파일을 확인하세요. "
-                "현재 버전은 대차 API 자동조회가 아닙니다."
-            )
-
-    except (
-        ValueError,
-        UnicodeError,
-        pd.errors.ParserError,
-        pd.errors.EmptyDataError,
-    ) as error:
-        messages.append(
-            f"대차 CSV 안내: {error}"
-        )
-
-    except Exception:
-        messages.append(
-            "대차 CSV를 읽지 못했습니다. "
-            "다른 분석은 계속합니다."
-        )
-
-    # -----------------------------------------------------
-    # 5. 최종 정리
-    # -----------------------------------------------------
 
     frame = frame.sort_index()
 
