@@ -796,7 +796,6 @@ def get_recent_signal(
             buy_col,
             sell_col,
         ),
-        "발生일": None,
         "발생일": recent.index[-1].strftime("%Y-%m-%d"),
     }
 
