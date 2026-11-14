@@ -12,14 +12,38 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
-# Secrets는 먼저 등록해야 합니다.
-# pykrx를 사용하는 모듈을 import하기 전에 설정합니다.
-for key in ("KRX_ID", "KRX_PW"):
-    value = st.secrets.get(key)
 
-    if value:
-        os.environ[key] = str(value)
+# =========================================================
+# 페이지 설정
+# =========================================================
+
+st.set_page_config(
+    page_title="종목별 분석",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# =========================================================
+# KRX 인증정보
+# 반드시 data_collector import 전에 설정합니다.
+# =========================================================
+
+for credential_key in ("KRX_ID", "KRX_PW"):
+    try:
+        credential_value = st.secrets.get(credential_key)
+    except (StreamlitSecretNotFoundError, KeyError):
+        credential_value = None
+
+    if credential_value:
+        os.environ[credential_key] = str(credential_value)
+
+# 인증정보를 화면이나 로그에 출력하지 않습니다.
+del credential_key
+del credential_value
 
 
 from analysis_engine import analyze_frame, recent_signals
@@ -30,13 +54,6 @@ from data_collector import fetch_data
 # =========================================================
 # 기본 설정
 # =========================================================
-
-st.set_page_config(
-    page_title="종목별 분석",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -50,12 +67,21 @@ TODAY_KST = datetime.now(ZoneInfo("Asia/Seoul")).date()
 YESTERDAY_KST = TODAY_KST - timedelta(days=1)
 
 RECENT_SIGNAL_DAYS = 5
-RESULT_SCHEMA = "png-v3-recent5"
-SAVED_RESULT_VERSION = 3
+
+# 이전 순매수금액 차트가 복원되지 않도록 버전을 변경합니다.
+RESULT_SCHEMA = "png-v4-volume-short"
+SAVED_RESULT_VERSION = 4
+
+# 이전 데이터 캐시와 구분합니다.
+DATA_CACHE_VERSION = "volume-short-v1"
 
 WEEKDAYS = ("월", "화", "수", "목", "금", "토", "일")
 
-# 이전 형식의 세션 결과 초기화
+
+# =========================================================
+# 세션 형식 초기화
+# =========================================================
+
 if st.session_state.get("result_schema") != RESULT_SCHEMA:
     for key in (
         "batch_results",
@@ -183,7 +209,7 @@ def load_stock_groups(path):
 
 
 # =========================================================
-# 가격 데이터 캐시
+# 가격·투자자·공매도 데이터 캐시
 # =========================================================
 
 @st.cache_data(
@@ -196,13 +222,19 @@ def cached_fetch(
     start_date,
     end_date,
     include_investors,
+    cache_version,
 ):
-    """공개 시장 데이터를 캐시합니다."""
+    """
+    공개 시장 데이터를 캐시합니다.
+
+    cache_version은 데이터 수집 구조 변경 시
+    이전 캐시를 구분하는 용도입니다.
+    """
     return fetch_data(
         ticker,
         start_date,
         end_date,
-        include_investors,
+        include_investors=include_investors,
     )
 
 
@@ -211,7 +243,7 @@ def cached_fetch(
 # =========================================================
 
 def normalize_date(value):
-    """값을 시간대 없는 한국 날짜 기준 Timestamp로 변환합니다."""
+    """한국 날짜 기준의 시간대 없는 Timestamp로 변환합니다."""
     if value is None:
         return pd.NaT
 
@@ -240,12 +272,9 @@ def normalize_date(value):
 
 def build_recent_signal_status(data, latest):
     """
-    분석 데이터에서 최근 5일의 마지막 신호를 직접 조회합니다.
+    가격 데이터 기준일 포함 최근 5일의 마지막 신호를 조회합니다.
 
-    기준:
-    - 가격 데이터의 마지막 날짜 포함
-    - 달력일 5일
-    - 기간 안에서 가장 마지막에 발생한 신호
+    5거래일이 아니라 주말·공휴일을 포함한 달력일 5일입니다.
     """
     if data is None or data.empty:
         raise ValueError("신호를 조회할 분석 데이터가 없습니다.")
@@ -293,11 +322,7 @@ def build_recent_signal_status(data, latest):
     ]
 
     def find_last_signal(buy_col, sell_col):
-        mask = (
-            recent[buy_col].eq(1)
-            | recent[sell_col].eq(1)
-        )
-
+        mask = recent[buy_col].eq(1) | recent[sell_col].eq(1)
         matched = recent.loc[mask]
 
         if matched.empty:
@@ -342,14 +367,11 @@ def build_recent_signal_status(data, latest):
 
 
 # =========================================================
-# 신호 표시 공통 처리
+# 신호 표시
 # =========================================================
 
 def get_signal_display(signal, signal_date, reference_date):
-    """
-    최근 5일 안에 유효한 신호가 있는지 확인하고
-    표시할 기호·색상·날짜를 반환합니다.
-    """
+    """신호 기호·색상·날짜를 반환합니다."""
     parsed_date = normalize_date(signal_date)
     reference = normalize_date(reference_date)
 
@@ -363,7 +385,6 @@ def get_signal_display(signal, signal_date, reference_date):
         start_date = reference - pd.Timedelta(
             days=RECENT_SIGNAL_DAYS - 1
         )
-
         valid = start_date <= parsed_date <= reference
 
     if not valid:
@@ -390,7 +411,7 @@ def signal_html(
     reference_date,
     compact=False,
 ):
-    """신호 표시용 HTML을 생성합니다."""
+    """화살표와 날짜를 HTML로 만듭니다."""
     display = get_signal_display(
         signal,
         signal_date,
@@ -406,8 +427,7 @@ def signal_html(
         return (
             f'<span style="color:{color};'
             f'font-size:{font_size}px;'
-            'font-weight:800;'
-            'line-height:1;">'
+            'font-weight:800;line-height:1;">'
             f'{symbol}'
             '</span>'
         )
@@ -418,22 +438,16 @@ def signal_html(
     date_text = escape(display["date_text"])
 
     return (
-        '<span style="'
-        'display:inline-flex;'
-        'align-items:center;'
-        'flex-wrap:wrap;'
-        f'column-gap:{gap}px;'
-        'row-gap:4px;'
-        f'color:{color};'
-        '">'
+        '<span style="display:inline-flex;'
+        'align-items:center;flex-wrap:wrap;'
+        f'column-gap:{gap}px;row-gap:4px;'
+        f'color:{color};">'
         f'<span style="font-size:{arrow_size}px;'
         'font-weight:900;line-height:1;">'
         f'{symbol}'
         '</span>'
         f'<span style="font-size:{date_size}px;'
-        'font-weight:800;'
-        'line-height:1.3;'
-        'white-space:nowrap;">'
+        'font-weight:800;line-height:1.3;white-space:nowrap;">'
         f'{date_text}'
         '</span>'
         '</span>'
@@ -446,7 +460,6 @@ def render_signal_card(
     signal_date,
     reference_date,
 ):
-    """상단 신호를 화살표와 날짜로 표시합니다."""
     st.caption(title)
 
     content = signal_html(
@@ -470,11 +483,7 @@ def render_signal_card(
 # =========================================================
 
 def render_results_overview(results):
-    """
-    전체 종목 요약표를 표시합니다.
-
-    종목명 또는 신호를 클릭하면 해당 상세분석으로 이동합니다.
-    """
+    """종목명·신호 클릭 시 상세분석 위치로 이동하는 요약표."""
     if not results:
         return
 
@@ -493,7 +502,6 @@ def render_results_overview(results):
 
     for position, result in enumerate(results, start=1):
         latest = result["latest"]
-
         name = escape(str(result["stock_name"]))
         ticker = escape(str(result["ticker"]))
         anchor = f"stock-detail-{position}"
@@ -520,22 +528,19 @@ def render_results_overview(results):
             '<span style="color:#808080;'
             'font-size:13px;font-weight:400;">'
             f'({ticker})'
-            '</span>'
-            '</a>'
+            '</span></a>'
         )
 
         weekly_link = (
             f'<a href="#{anchor}" target="_self" '
             'style="display:block;text-decoration:none;">'
-            f'{weekly_html}'
-            '</a>'
+            f'{weekly_html}</a>'
         )
 
         combined_link = (
             f'<a href="#{anchor}" target="_self" '
             'style="display:block;text-decoration:none;">'
-            f'{combined_html}'
-            '</a>'
+            f'{combined_html}</a>'
         )
 
         rows.append(
@@ -580,11 +585,11 @@ def render_results_overview(results):
 
 
 # =========================================================
-# 고해상도 PNG 저장
+# 차트 저장
 # =========================================================
 
 def save_chart_png(png_bytes, stock_name, analysis_date):
-    """동일 종목·동일 날짜 PNG는 덮어씁니다."""
+    """같은 종목·날짜의 PNG는 덮어씁니다."""
     if not png_bytes:
         raise ValueError("저장할 차트 이미지가 없습니다.")
 
@@ -608,7 +613,6 @@ def save_chart_png(png_bytes, stock_name, analysis_date):
 # =========================================================
 
 def korean_signal_table(frame):
-    """최근 신호 표의 숫자·색상·기호를 설정합니다."""
     table = frame.copy()
 
     trend_columns = {
@@ -681,7 +685,10 @@ def korean_signal_table(frame):
     if "괴리율(%)" in table.columns:
         formats["괴리율(%)"] = "{:.1f}%"
 
-    styled = table.style.format(formats, na_rep="")
+    styled = table.style.format(
+        formats,
+        na_rep="",
+    )
 
     if "괴리율(%)" in table.columns:
         styled = styled.map(
@@ -711,7 +718,6 @@ def korean_signal_table(frame):
 
 
 def korean_metrics_table(frame):
-    """성과 표의 전략명을 한글로 변환합니다."""
     table = frame.copy()
 
     if "전략" in table.columns:
@@ -726,7 +732,6 @@ def korean_metrics_table(frame):
 
 
 def profit_color(value):
-    """수익률 양수는 빨간색, 음수는 파란색으로 표시합니다."""
     if pd.isna(value):
         return ""
 
@@ -750,7 +755,7 @@ def profit_color(value):
 
 
 # =========================================================
-# 종목별 상세 결과
+# 종목 상세 결과
 # =========================================================
 
 def render_stock_result(result, position):
@@ -784,7 +789,7 @@ def render_stock_result(result, position):
         f"상단 신호 조회 기간: "
         f"{signal_start:%Y-%m-%d} ~ {reference_date:%Y-%m-%d}"
         f" · 기준일 포함 최근 {RECENT_SIGNAL_DAYS}일"
-        " · 기간 내 마지막 신호 표시"
+        " · 기간 내 마지막 신호"
     )
 
     price_column, weekly_column, combined_column = st.columns(3)
@@ -826,12 +831,11 @@ def render_stock_result(result, position):
     st.markdown("### 최근 매매 신호")
 
     st.caption(
-        "아래 표는 전체 분석 기간에서 최근 5건을 표시합니다. "
+        "아래 표는 전체 분석 기간의 최근 5건입니다. "
         "상단의 최근 5일 요약과는 조회 범위가 다릅니다."
     )
 
     st.markdown("**주간 단독 신호**")
-
     weekly_signals = result["weekly_signals"]
 
     if weekly_signals.empty:
@@ -844,7 +848,6 @@ def render_stock_result(result, position):
         )
 
     st.markdown("**주간·월간 결합 신호**")
-
     combined_signals = result["combined_signals"]
 
     if combined_signals.empty:
@@ -860,6 +863,11 @@ def render_stock_result(result, position):
 
     # 종합차트
     st.markdown("### 종합차트")
+
+    st.caption(
+        "패널 5: 외국인·기관·개인 누적 순매수 수량(주) / "
+        "패널 6: 일별 공매도 거래 수량(주)"
+    )
 
     png_bytes = result.get("png_bytes")
 
@@ -913,26 +921,20 @@ def render_stock_result(result, position):
         }
 
         for strategy, trades in result["trades"].items():
-            strategy_name = strategy_names.get(
-                strategy,
-                strategy,
-            )
-
-            st.markdown(f"#### {strategy_name} 거래 기록")
+            label = strategy_names.get(strategy, strategy)
+            st.markdown(f"#### {label} 거래 기록")
 
             if trades.empty:
                 st.info("청산이 완료된 거래가 없습니다.")
                 continue
 
-            trade_table = trades.copy()
-
-            trade_table = trade_table.drop(
+            table = trades.copy().drop(
                 columns=["전략"],
                 errors="ignore",
             )
 
             if strategy == "Weekly":
-                trade_table = trade_table.drop(
+                table = table.drop(
                     columns=[
                         "수익(원)",
                         "보유기간(일)",
@@ -943,10 +945,10 @@ def render_stock_result(result, position):
                 )
 
             for column in ("매수일", "매도일"):
-                if column in trade_table.columns:
-                    trade_table[column] = (
+                if column in table.columns:
+                    table[column] = (
                         pd.to_datetime(
-                            trade_table[column],
+                            table[column],
                             errors="coerce",
                         )
                         .dt.strftime("%Y-%m-%d")
@@ -955,18 +957,18 @@ def render_stock_result(result, position):
             formats = {
                 column: "{:,.0f}"
                 for column in ("매수가", "매도가")
-                if column in trade_table.columns
+                if column in table.columns
             }
 
-            if "수익률(%)" in trade_table.columns:
+            if "수익률(%)" in table.columns:
                 formats["수익률(%)"] = "{:.2f}%"
 
-            styled = trade_table.style.format(
+            styled = table.style.format(
                 formats,
                 na_rep="",
             )
 
-            if "수익률(%)" in trade_table.columns:
+            if "수익률(%)" in table.columns:
                 styled = styled.map(
                     profit_color,
                     subset=["수익률(%)"],
@@ -986,7 +988,6 @@ def render_stock_result(result, position):
 # =========================================================
 
 def dataframe_to_json_data(frame):
-    """DataFrame을 JSON 저장 구조로 변환합니다."""
     return json.loads(
         frame.to_json(
             orient="split",
@@ -997,7 +998,6 @@ def dataframe_to_json_data(frame):
 
 
 def json_data_to_dataframe(data):
-    """저장된 표를 DataFrame으로 복원합니다."""
     return pd.read_json(
         io.StringIO(
             json.dumps(data, ensure_ascii=False)
@@ -1007,11 +1007,10 @@ def json_data_to_dataframe(data):
 
 
 # =========================================================
-# 마지막 분석 결과 저장
+# 마지막 결과 저장
 # =========================================================
 
 def save_last_analysis(results, records, period):
-    """마지막 분석 결과와 PNG를 하나의 파일에 저장합니다."""
     if not results:
         return
 
@@ -1087,11 +1086,10 @@ def save_last_analysis(results, records, period):
 
 
 # =========================================================
-# 마지막 분석 결과 복원
+# 마지막 결과 복원
 # =========================================================
 
 def load_last_analysis():
-    """현재 저장 형식과 최근 신호 기준에 맞는 결과만 복원합니다."""
     if not LAST_RESULT_FILE.is_file():
         return False
 
@@ -1105,17 +1103,17 @@ def load_last_analysis():
     ):
         st.session_state["restore_notice"] = (
             "이전 형식의 저장 결과가 있습니다. "
-            "최근 5일 신호를 적용하려면 "
+            "누적 순매수 수량·공매도 차트를 적용하려면 "
             "'분석 실행'을 다시 눌러주세요."
         )
         return False
 
-    restored_results = []
+    restored = []
 
     for item in payload.get("results", []):
         latest = item["latest"]
 
-        required_latest_keys = {
+        required = {
             "Weekly 신호",
             "Weekly+Monthly 신호",
             "Weekly 신호일",
@@ -1124,7 +1122,7 @@ def load_last_analysis():
         }
 
         if (
-            not required_latest_keys.issubset(latest)
+            not required.issubset(latest)
             or latest["신호 조회 일수"] != RECENT_SIGNAL_DAYS
         ):
             st.session_state["restore_notice"] = (
@@ -1135,7 +1133,7 @@ def load_last_analysis():
 
         encoded_png = item.get("png_base64")
 
-        restored_results.append({
+        restored.append({
             "stock_name": item["stock_name"],
             "ticker": item["ticker"],
             "latest": latest,
@@ -1161,10 +1159,10 @@ def load_last_analysis():
             },
         })
 
-    if not restored_results:
+    if not restored:
         return False
 
-    st.session_state["batch_results"] = restored_results
+    st.session_state["batch_results"] = restored
     st.session_state["batch_records"] = payload.get("records", [])
     st.session_state["batch_period"] = payload.get("period")
     st.session_state["last_saved_at"] = payload.get("saved_at")
@@ -1231,23 +1229,22 @@ def run_batch(
             progress.progress(index / total)
             continue
 
-        # 가격 데이터 및 분석
+        # 데이터 조회 및 분석
         try:
             frame, fetch_messages = cached_fetch(
                 ticker,
                 start.strftime("%Y%m%d"),
                 end.strftime("%Y%m%d"),
                 include_investors,
+                DATA_CACHE_VERSION,
             )
 
-            # 이전 엔진과의 호환성을 위해 추가 인자 없이 호출합니다.
             analysis = analyze_frame(
                 frame,
                 stock_name,
                 excel_file=str(excel_path),
             )
 
-            # 최근 5일 요약 신호를 app.py에서 직접 계산합니다.
             analysis["latest"] = build_recent_signal_status(
                 data=analysis["data"],
                 latest=analysis["latest"],
@@ -1307,13 +1304,13 @@ def run_batch(
                 excel_file=str(excel_path),
             )
 
-            image_path, saved_png_bytes = save_chart_png(
+            image_path, saved_png = save_chart_png(
                 png_bytes,
                 stock_name,
                 analysis_date,
             )
 
-            display_result["png_bytes"] = saved_png_bytes
+            display_result["png_bytes"] = saved_png
             display_result["image_filename"] = image_path.name
 
         except Exception as error:
@@ -1343,7 +1340,7 @@ def run_batch(
         st.session_state["batch_results"] = results
         st.session_state["batch_records"] = records
 
-        # 완료된 상세 결과부터 표시합니다.
+        # 완료된 종목의 상세분석부터 표시
         try:
             with results_container:
                 render_stock_result(
@@ -1360,7 +1357,7 @@ def run_batch(
                     f"{stock_name} 결과 표시 실패: {error}"
                 )
 
-        # 맨 위 요약표를 누적 결과로 갱신합니다.
+        # 맨 위 요약표 갱신
         with overview_container.container():
             render_results_overview(results)
 
@@ -1441,21 +1438,35 @@ try:
 
 except Exception as error:
     st.error(str(error))
-
     st.info(
         "app.py와 같은 폴더에 stocks.txt를 만들고 "
         "[그룹명] 아래에 '종목명,종목코드'를 등록하세요."
     )
-
     st.stop()
 
 
 # =========================================================
-# 왼쪽: 그룹·종목·기간 선택
+# 왼쪽: 설정
 # =========================================================
 
 with st.sidebar:
     st.header("등록 종목")
+
+    credentials_present = bool(
+        os.environ.get("KRX_ID")
+        and os.environ.get("KRX_PW")
+    )
+
+    if credentials_present:
+        st.caption(
+            "KRX 인증정보가 설정되어 있습니다. "
+            "로그인 성공 여부는 실제 조회 시 확인됩니다."
+        )
+    else:
+        st.warning(
+            "KRX 인증정보가 설정되지 않았습니다. "
+            "인증이 필요한 데이터 조회가 실패할 수 있습니다."
+        )
 
     group_names = list(stock_groups)
 
@@ -1515,7 +1526,7 @@ with st.sidebar:
         )
 
         include_investors = st.checkbox(
-            "투자자 매매 데이터 포함",
+            "투자자 순매수 수량 포함",
             value=True,
         )
 
@@ -1523,6 +1534,10 @@ with st.sidebar:
             "분석 실행",
             use_container_width=True,
         )
+
+    st.caption(
+        "공매도 거래 수량은 투자자 체크 여부와 관계없이 조회합니다."
+    )
 
     st.caption(
         "재무 파일: file/종목명.xlsx\n\n"
@@ -1533,23 +1548,28 @@ with st.sidebar:
     st.caption(
         "필수 엑셀 컬럼: 분기, 목표가, 영업이익\n\n"
         "종료일은 어제까지 선택할 수 있으며 "
-        "장중 시세는 사용하지 않습니다."
+        "별도 장중 시세는 합성하지 않습니다."
     )
 
     st.caption(
-        f"상단 신호는 가격 데이터 기준일을 포함한 "
+        f"상단 신호: 가격 데이터 기준일 포함 "
         f"최근 {RECENT_SIGNAL_DAYS}일"
-        "(주말·공휴일 포함)의 마지막 신호입니다.\n\n"
+        "(주말·공휴일 포함)의 마지막 신호\n\n"
         "빨간 ↑: 매수 / 파란 ↓: 매도 / 회색 ×: 신호 없음"
+    )
+
+    st.caption(
+        "패널 5: 조회 시작일부터 누적한 순매수 수량\n\n"
+        "패널 6: 일별 공매도 거래 수량과 5거래일 평균\n\n"
+        "차트 표시 범위는 최근 2년입니다."
     )
 
     st.divider()
 
-    if st.button("가격 데이터 캐시 초기화"):
+    if st.button("가격·수급 데이터 캐시 초기화"):
         cached_fetch.clear()
-
         st.success(
-            "가격 데이터 캐시를 초기화했습니다. "
+            "데이터 캐시를 초기화했습니다. "
             "'분석 실행'을 누르면 새로 조회합니다."
         )
 
@@ -1572,7 +1592,7 @@ with st.sidebar:
 
 
 # =========================================================
-# 오른쪽: 분석 실행 및 결과 표시
+# 오른쪽: 분석 실행 및 결과
 # =========================================================
 
 st.title("종목별 분석 결과")
@@ -1585,8 +1605,7 @@ restore_notice = st.session_state.pop(
 if restore_notice:
     st.info(restore_notice)
 
-# 요약표 위치를 맨 위에 확보합니다.
-# empty 안의 container를 교체하여 분석 중 표가 중복되지 않게 합니다.
+# 가장 위에 전체 결과 요약표 위치를 확보합니다.
 overview_container = st.empty()
 progress_container = st.container()
 summary_container = st.container()
@@ -1668,7 +1687,6 @@ if not batch_started:
         for position, result in enumerate(results, start=1):
             try:
                 render_stock_result(result, position)
-
             except Exception as error:
                 st.error(
                     f'{result.get("stock_name", "종목")} '
