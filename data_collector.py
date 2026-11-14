@@ -1,4 +1,4 @@
-"""원본 DataCollector 재사용. import 시 데이터 수집을 실행하지 않습니다."""
+﻿"""원본 DataCollector 재사용. import 시 데이터 수집을 실행하지 않습니다."""
 import io
 import re
 import time
@@ -353,8 +353,13 @@ class DataCollector:
 
         return df
 
-def fetch_data(ticker, start_date, end_date, include_investors=True):
-    """과거 일봉과 선택적 투자자 데이터를 수집합니다."""
+def fetch_data(
+    ticker,
+    start_date,
+    end_date,
+    include_investors=True,
+):
+    """과거 일봉과 선택적 투자자 수량·금액 데이터를 수집합니다."""
     ticker = str(ticker).strip().zfill(6)
 
     ohlcv = DataCollector.fetch_ohlcv(
@@ -363,22 +368,195 @@ def fetch_data(ticker, start_date, end_date, include_investors=True):
         end_date,
         include_today_live=False,
     )
+
     if ohlcv is None or ohlcv.empty:
         raise ValueError(
             "가격 데이터를 가져오지 못했습니다. "
-            "종목코드, 기간, 인터넷 연결 또는 pykrx/KRX 상태를 확인하세요."
+            "종목코드, 기간, 인터넷 연결 또는 "
+            "pykrx/KRX 인증 상태를 확인하세요."
         )
 
-    messages = []
-    investors = None   
+    ohlcv = ohlcv.copy()
+    ohlcv.index = pd.to_datetime(
+        ohlcv.index,
+        errors="coerce",
+    )
 
-    frame = DataCollector.merge_data(ohlcv, investors)
+    ohlcv = ohlcv.loc[
+        ~ohlcv.index.isna()
+    ].copy()
+
+    if ohlcv.index.tz is not None:
+        ohlcv.index = (
+            ohlcv.index
+            .tz_convert("Asia/Seoul")
+            .tz_localize(None)
+        )
+
+    ohlcv.index = ohlcv.index.normalize()
+    ohlcv = ohlcv.sort_index()
+
+    if ohlcv.index.has_duplicates:
+        ohlcv = ohlcv.loc[
+            ~ohlcv.index.duplicated(keep="last")
+        ].copy()
+
+    messages = []
+    investors = None
+    net_value = None
+
+    if include_investors:
+        # 기존 5번째 패널: 순매수 수량
+        investors = DataCollector.fetch_investor_trading(
+            ticker,
+            start_date,
+            end_date,
+        )
+
+        if investors is None or investors.empty:
+            investors = None
+            messages.append(
+                "투자자 순매수 수량을 가져오지 못했습니다."
+            )
+
+        # 새 6번째 패널: 순매수금액
+        net_value = DataCollector.fetch_investor_net_value(
+            ticker,
+            start_date,
+            end_date,
+        )
+
+        if net_value is None or net_value.empty:
+            net_value = None
+            messages.append(
+                "투자자 순매수금액을 가져오지 못했습니다. "
+                "KRX 인증 및 pykrx 조회 상태를 확인하세요."
+            )
+
+    frame = DataCollector.merge_data(
+        ohlcv,
+        investors,
+    )
+
     if frame is None or frame.empty:
         raise ValueError("분석할 데이터가 없습니다.")
 
+    if net_value is not None:
+        frame = frame.join(
+            net_value,
+            how="left",
+        )
+
+        value_columns = [
+            "외국인_순매수금액",
+            "기관_순매수금액",
+            "개인_순매수금액",
+        ]
+
+        # 거래량이 있는 날짜의 수급 금액 누락 여부를 확인합니다.
+        trading_rows = pd.to_numeric(
+            frame["거래량"],
+            errors="coerce",
+        ).gt(0)
+
+        missing_rows = (
+            frame.loc[trading_rows, value_columns]
+            .isna()
+            .any(axis=1)
+        )
+
+        if missing_rows.any():
+            messages.append(
+                "일부 거래일의 순매수금액이 누락되어 있습니다. "
+                "누락값은 0으로 보정하지 않으며, "
+                "누적금액 차트가 중간에서 끊길 수 있습니다."
+            )
+
     frame = frame.sort_index()
+
     if frame.index.has_duplicates:
-        frame = frame.loc[~frame.index.duplicated(keep="last")].copy()
+        frame = frame.loc[
+            ~frame.index.duplicated(keep="last")
+        ].copy()
+
         messages.append("중복 날짜를 제거했습니다.")
 
     return frame, messages
+
+
+@staticmethod
+def fetch_investor_net_value(ticker, start_date, end_date):
+    """
+    외국인·기관·개인의 일별 순매수금액을 조회합니다.
+
+    반환 단위: 원
+    """
+    raw = DataCollector._call_pykrx_safely(
+        stock.get_market_trading_value_by_date,
+        start_date,
+        end_date,
+        ticker,
+        on="순매수",
+    )
+
+    if raw is None or raw.empty:
+        return None
+
+    raw = raw.copy()
+
+    raw.index = pd.to_datetime(
+        raw.index,
+        errors="coerce",
+    )
+
+    raw = raw.loc[~raw.index.isna()].copy()
+
+    if raw.index.tz is not None:
+        raw.index = (
+            raw.index
+            .tz_convert("Asia/Seoul")
+            .tz_localize(None)
+        )
+
+    raw.index = raw.index.normalize()
+    raw = raw.sort_index()
+
+    raw = raw.loc[
+        ~raw.index.duplicated(keep="last")
+    ].copy()
+
+    required = {
+        "외국인합계",
+        "기관합계",
+        "개인",
+    }
+
+    if not required.issubset(raw.columns):
+        return None
+
+    result = pd.DataFrame(index=raw.index)
+
+    mapping = {
+        "외국인합계": "외국인_순매수금액",
+        "기관합계": "기관_순매수금액",
+        "개인": "개인_순매수금액",
+    }
+
+    for source, target in mapping.items():
+        result[target] = pd.to_numeric(
+            raw[source],
+            errors="coerce",
+        )
+
+    result = result.replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+
+    if result.empty or result.isna().all().all():
+        return None
+
+    return result
+
+
+

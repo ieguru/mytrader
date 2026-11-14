@@ -13,6 +13,15 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
+# Secrets는 먼저 등록해야 합니다.
+# pykrx를 사용하는 모듈을 import하기 전에 설정합니다.
+for key in ("KRX_ID", "KRX_PW"):
+    value = st.secrets.get(key)
+
+    if value:
+        os.environ[key] = str(value)
+
+
 from analysis_engine import analyze_frame, recent_signals
 from charts import make_chart_png
 from data_collector import fetch_data
