@@ -69,8 +69,8 @@ YESTERDAY_KST = TODAY_KST - timedelta(days=1)
 RECENT_SIGNAL_DAYS = 5
 
 # 이전 순매수금액 차트가 복원되지 않도록 버전을 변경합니다.
-RESULT_SCHEMA = "png-v5-financial-loan"
-SAVED_RESULT_VERSION = 5
+RESULT_SCHEMA = "png-v7-18months-synced"
+SAVED_RESULT_VERSION = 7
 
 DATA_CACHE_VERSION = "financial-loan-csv-v1"
 
@@ -864,11 +864,12 @@ def render_stock_result(result, position):
     st.markdown("### 종합차트")
 
     st.caption(
-        "패널 3: 외국인·기관·개인 누적 순매수 수량 / "
-        "패널 4: 매출액·영업이익·순이익 / "
-        "패널 5: MACD / "
-        "패널 6: 공매도 거래 수량 / "
-        "패널 7: 대차 체결·상환 수량"
+        "최근 18개월 · 모든 패널 날짜 동기화 / "
+        "패널 1: 주가·목표가·매매 신호 / "
+        "패널 2: 거래량 / "
+        "패널 3: 일간·주간·월간 MACD / "
+        "패널 4: 외국인·기관·개인 누적 순매수 수량 / "
+        "패널 5: 종료된 최근 6개 분기의 재무"
     )
     png_bytes = result.get("png_bytes")
 
