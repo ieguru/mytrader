@@ -1,6 +1,6 @@
 ﻿# analysis_engine.py
 """
-화면 출력이나 자동 파일 저장 없이 분석 결과를 반환합니다.
+不进行界面输出或自动文件保存，只返回分析结果。
 
 재무 엑셀 필수 컬럼:
     분기
@@ -14,18 +14,49 @@
     단위 환산은 하지 않습니다.
 
 최근 신호:
-    가격 데이터 기준일 포함 최근 5일의 마지막 신호
+    가격 데이터 기준일 포함 최근 7일의 마지막 신호
     거래일이 아닌 달력일 기준
 
-주의:
-    기존 주간·월간 MACD 계산 방식을 유지합니다.
-    같은 주·월의 마지막 가용 종가를 해당 기간 전체에
-    배정하므로 데이터가 추가되면 과거 값과 신호가
-    바뀔 수 있습니다.
+주간·월간 결합 신호:
+    매수:
+        이번 달 Monthly Oscillator > 전월 Oscillator
+        그리고
+        이번 주 Weekly Oscillator > 전주 Oscillator
 
-    기존 백테스트는 이 신호를 그대로 사용하므로
-    미래 정보 참조 가능성이 있는 기존 방식입니다.
-    이번 수정은 이를 교정하는 변경이 아닙니다.
+    매도:
+        이번 달 Monthly Oscillator < 전월 Oscillator
+        그리고
+        이번 주 Weekly Oscillator < 전주 Oscillator
+
+    동일하거나 비교값이 없으면 해당 방향 조건 미충족.
+
+    Oscillator가 양수인지 음수인지는 조건에 포함하지 않습니다.
+    추세 전환 여부도 결합 신호 조건에 포함하지 않습니다.
+
+    조건이 유지되는 동안 매일 같은 방향 조건 신호가 발생합니다.
+    백테스트는 단일 포지션만 유지하므로 반복 매수하지 않습니다.
+
+주간·월간 MACD:
+    각 거래일 당시까지의 종가로 진행 중인 주·월을 계산합니다.
+    나중에 확정된 주·월 값을 과거 날짜로 역배정하지 않습니다.
+
+    각 날짜의 진행 중인 주·월 EMA 계산은
+    직전 기간까지 확정된 EMA 상태에서 계산합니다.
+    하루가 지날 때마다 주·월 EMA를 반복 누적하지 않습니다.
+
+주의:
+    진행 중인 주·월의 현재 조건은 날짜가 지나면서 변할 수 있습니다.
+    하지만 동일한 과거 가격을 유지한다면,
+    나중 데이터 추가만으로 과거 날짜의 기술적 신호를
+    다시 쓰도록 계산하지 않습니다.
+
+    재무값은 분기별로 매핑합니다.
+    공시 당시의 이용 가능 시점을 반영한 데이터는 아닙니다.
+    재무값은 신호나 백테스트 매매 조건에 사용하지 않습니다.
+
+    백테스트는 신호 발생일 종가 체결을 가정합니다.
+    이는 실제 체결 가능성을 보장하지 않습니다.
+    수수료·세금·슬리피지·미청산 평가손익은 제외합니다.
 
 공매도·대차거래 조회 기능은 포함하지 않습니다.
 """
@@ -34,7 +65,11 @@ import numpy as np
 import pandas as pd
 
 
-RECENT_SIGNAL_DAYS = 5
+# =========================================================
+# 기본 설정
+# =========================================================
+
+RECENT_SIGNAL_DAYS = 7
 
 FINANCIAL_VALUE_COLUMNS = (
     "목표가",
@@ -70,6 +105,9 @@ def to_numeric(series):
 
 def normalize_timestamp(value):
     """한국 날짜 기준 시간대 없는 Timestamp."""
+    if value is None:
+        raise ValueError("유효한 날짜가 필요합니다.")
+
     timestamp = pd.Timestamp(value)
 
     if pd.isna(timestamp):
@@ -85,6 +123,61 @@ def normalize_timestamp(value):
     return timestamp.normalize()
 
 
+def validate_positive_integer(value, message):
+    if (
+        not isinstance(value, (int, np.integer))
+        or isinstance(value, (bool, np.bool_))
+        or value < 1
+    ):
+        raise ValueError(message)
+
+    return int(value)
+
+
+def previous_period_values(series, frequency):
+    """
+    각 날짜에 대응하는 직전 달력 기간의 마지막 값을 반환합니다.
+
+    예:
+        frequency="W-FRI":
+            이번 주 각 날짜 → 전주의 마지막 값
+
+        frequency="M":
+            이번 달 각 날짜 → 전월의 마지막 값
+
+    같은 기간의 미래 값을 현재 날짜에 사용하지 않습니다.
+    직전 기간 자체가 없으면 NaN입니다.
+    """
+    if not isinstance(series.index, pd.DatetimeIndex):
+        raise ValueError(
+            "지표 인덱스는 날짜 형식이어야 합니다."
+        )
+
+    values = to_numeric(series).astype(float)
+    periods = values.index.to_period(frequency)
+
+    # NaN을 건너뛰지 않고 실제 마지막 행 값을 사용합니다.
+    period_last = values.groupby(
+        periods,
+        sort=True,
+    ).agg(
+        lambda group: group.iloc[-1]
+    )
+
+    # 전 기간 값을 다음 기간의 키로 이동시킵니다.
+    # 기간이 누락되면 더 오래된 값을 임의 대체하지 않습니다.
+    previous_lookup = period_last.copy()
+    previous_lookup.index = previous_lookup.index + 1
+
+    mapped = periods.map(previous_lookup)
+
+    return pd.Series(
+        np.asarray(mapped, dtype=float),
+        index=values.index,
+        dtype=float,
+    )
+
+
 # =========================================================
 # 재무 엑셀 읽기·검증
 # =========================================================
@@ -93,16 +186,12 @@ def read_financial_excel(excel_file, stock_name):
     """
     종목별 재무 시트를 읽고 검증합니다.
 
-    반환값:
-        분기 오름차순으로 정렬된 DataFrame
-
     목표가:
         음수는 0으로 보정합니다.
-        100원 단위 반올림은 목표가 매핑 시 적용합니다.
+        100원 단위 반올림은 매핑 시 적용합니다.
 
-    매출액·영업이익·순이익:
-        입력값을 그대로 유지합니다.
-        음수와 결측값도 그대로 유지합니다.
+    나머지 재무값:
+        입력값과 결측값을 그대로 유지합니다.
     """
     with pd.ExcelFile(excel_file) as book:
         if stock_name not in book.sheet_names:
@@ -137,7 +226,6 @@ def read_financial_excel(excel_file, stock_name):
             + ", ".join(sorted(missing))
         )
 
-    # 완전히 빈 행만 제거합니다.
     financial = (
         financial
         .dropna(how="all")
@@ -157,8 +245,10 @@ def read_financial_excel(excel_file, stock_name):
 
     valid_quarters = (
         financial["분기"]
-        .str.fullmatch(r"\d{4}\.[1-4]Q")
-        .fillna(False)
+        .str.fullmatch(
+            r"\d{4}\.[1-4]Q",
+            na=False,
+        )
     )
 
     if not valid_quarters.all():
@@ -187,7 +277,7 @@ def read_financial_excel(excel_file, stock_name):
 
         supplied = (
             original.notna()
-            & cleaned.ne("")
+            & cleaned.ne("").fillna(False)
         )
 
         invalid = supplied & (
@@ -211,7 +301,6 @@ def read_financial_excel(excel_file, stock_name):
         .clip(lower=0)
     )
 
-    # YYYY.NQ는 문자열 정렬로도 분기 순서가 유지됩니다.
     return (
         financial
         .sort_values("분기")
@@ -232,11 +321,12 @@ def validate_excel(excel_file, stock_name):
 # =========================================================
 
 class FinancialDataManager:
-    """재무 데이터 및 분기 정보 관리."""
 
     @staticmethod
-    def load_financial_data(excel_file, sheet_name):
-        """분기별 재무 데이터를 반환합니다."""
+    def load_financial_data(
+        excel_file,
+        sheet_name,
+    ):
         return read_financial_excel(
             excel_file,
             sheet_name,
@@ -249,8 +339,6 @@ class FinancialDataManager:
         stock_name="",
     ):
         """
-        분기별 목표가 사전을 반환합니다.
-
         기존 호출 호환성을 위해 stock_name 인자를 유지합니다.
         """
         financial = (
@@ -266,12 +354,11 @@ class FinancialDataManager:
             financial["분기"],
             financial["목표가"],
         ):
-            if pd.notna(price):
-                target_prices[str(quarter)] = int(
-                    round(float(price) / 100) * 100
-                )
-            else:
-                target_prices[str(quarter)] = np.nan
+            target_prices[str(quarter)] = (
+                int(round(float(price) / 100) * 100)
+                if pd.notna(price)
+                else np.nan
+            )
 
         return target_prices
 
@@ -308,19 +395,10 @@ class FinancialDataManager:
         sheet_name,
     ):
         """
-        기존 함수명을 유지하면서 다음 컬럼을 추가합니다.
+        분기별 재무값을 같은 분기의 일봉에 매핑합니다.
 
-            분기
-            목표가
-            매출액
-            영업이익
-            순이익
-            괴리율(%)
-
-        주의:
-            재무값은 같은 분기의 일봉 행에 매핑합니다.
-            공시 당시 이용 가능했던 시점 기준 데이터는 아닙니다.
-            매매 신호 및 백테스트 조건에는 사용하지 않습니다.
+        공시 당시 이용 가능했던 시점 기준이 아니며,
+        매매 신호 및 백테스트 조건에는 사용하지 않습니다.
         """
         result = df.copy()
 
@@ -335,18 +413,13 @@ class FinancialDataManager:
             FinancialDataManager.get_quarter
         )
 
-        quarterly = financial.set_index(
-            "분기"
-        )
+        quarterly = financial.set_index("분기")
 
-        rounded_targets = (
-            quarterly["목표가"]
-            .map(
-                lambda value: (
-                    int(round(float(value) / 100) * 100)
-                    if pd.notna(value)
-                    else np.nan
-                )
+        rounded_targets = quarterly["목표가"].map(
+            lambda value: (
+                int(round(float(value) / 100) * 100)
+                if pd.notna(value)
+                else np.nan
             )
         )
 
@@ -384,6 +457,24 @@ class FinancialDataManager:
 
 class TechnicalIndicator:
 
+    TIMEFRAME_PARAMS = {
+        "daily": {
+            "fast": 12,
+            "slow": 26,
+            "signal": 9,
+        },
+        "weekly": {
+            "fast": 5,
+            "slow": 13,
+            "signal": 5,
+        },
+        "monthly": {
+            "fast": 3,
+            "slow": 7,
+            "signal": 3,
+        },
+    }
+
     @staticmethod
     def ema(series, span=12):
         return series.ewm(
@@ -402,27 +493,13 @@ class TechnicalIndicator:
     ):
         result = df.copy()
 
-        timeframe_params = {
-            "daily": {
-                "fast": 12,
-                "slow": 26,
-                "signal": 9,
-            },
-            "weekly": {
-                "fast": 5,
-                "slow": 13,
-                "signal": 5,
-            },
-            "monthly": {
-                "fast": 3,
-                "slow": 7,
-                "signal": 3,
-            },
-        }
-
-        defaults = timeframe_params.get(
-            str(timeframe).lower(),
-            timeframe_params["daily"],
+        defaults = (
+            TechnicalIndicator.TIMEFRAME_PARAMS.get(
+                str(timeframe).lower(),
+                TechnicalIndicator.TIMEFRAME_PARAMS[
+                    "daily"
+                ],
+            )
         )
 
         fast = (
@@ -443,25 +520,25 @@ class TechnicalIndicator:
             else signal
         )
 
+        prices = to_numeric(
+            result[price_col]
+        ).astype(float)
+
         ema_fast = TechnicalIndicator.ema(
-            result[price_col],
+            prices,
             fast,
         )
 
         ema_slow = TechnicalIndicator.ema(
-            result[price_col],
+            prices,
             slow,
         )
 
-        result["MACD"] = (
-            ema_fast - ema_slow
-        )
+        result["MACD"] = ema_fast - ema_slow
 
-        result["Signal"] = (
-            TechnicalIndicator.ema(
-                result["MACD"],
-                signal,
-            )
+        result["Signal"] = TechnicalIndicator.ema(
+            result["MACD"],
+            signal,
         )
 
         result["Oscillator"] = (
@@ -486,108 +563,225 @@ class TechnicalIndicator:
         )
 
     @staticmethod
-    def add_weekly_macd(df):
+    def _add_period_macd_asof(
+        df,
+        prefix,
+        frequency,
+        fast,
+        slow,
+        signal,
+    ):
         """
-        기존 주간 계산 방식 유지.
+        각 날짜 당시까지의 진행 중인 기간 MACD를 계산합니다.
 
-        같은 주의 모든 날짜에 해당 주의 마지막 가용 종가로
-        계산한 주간 값을 배정합니다.
+        예: 주간
+            전주까지 확정된 EMA 상태를 보관합니다.
+            이번 주 월요일은 월요일 종가로 가계산합니다.
+            화요일은 같은 전주 EMA 상태에서 화요일 종가로
+            다시 계산합니다.
+
+            월요일 가계산 EMA에 화요일을 재누적하지 않습니다.
+
+        EMA는 실제 관측된 기간의 종가를 기준으로 계산합니다.
+        가격이 전혀 없는 기간의 종가를 임의 생성하지 않습니다.
         """
-        weekly = (
-            df[["종가"]]
-            .resample("W-FRI")
-            .last()
-        )
-
-        weekly = TechnicalIndicator.macd(
-            weekly,
-            timeframe="weekly",
-        )
-
-        weekly = weekly.rename(
-            columns={
-                "MACD": "Weekly_MACD",
-                "Signal": "Weekly_Signal",
-                "Oscillator": "Weekly_Oscillator",
-            }
-        )
-
-        columns = [
-            "Weekly_MACD",
-            "Weekly_Signal",
-            "Weekly_Oscillator",
-        ]
-
-        weekly = weekly[columns].copy()
-
-        weekly.index = (
-            weekly.index.to_period("W-FRI")
-        )
-
         result = df.copy()
 
-        periods = result.index.to_period(
-            "W-FRI"
+        if not isinstance(
+            result.index,
+            pd.DatetimeIndex,
+        ):
+            raise ValueError(
+                "MACD 데이터 인덱스는 날짜 형식이어야 합니다."
+            )
+
+        if (
+            not result.index.is_monotonic_increasing
+            or result.index.has_duplicates
+        ):
+            raise ValueError(
+                "MACD 데이터 날짜는 중복 없이 "
+                "오름차순이어야 합니다."
+            )
+
+        prices = (
+            to_numeric(result["종가"])
+            .to_numpy(dtype=float)
         )
 
-        for column in columns:
-            result[column] = periods.map(
-                weekly[column]
+        if not np.isfinite(prices).all():
+            raise ValueError(
+                "MACD 계산에 유효하지 않은 종가가 있습니다."
             )
+
+        periods = result.index.to_period(
+            frequency
+        )
+
+        alpha_fast = 2.0 / (fast + 1.0)
+        alpha_slow = 2.0 / (slow + 1.0)
+        alpha_signal = 2.0 / (signal + 1.0)
+
+        count = len(result)
+
+        macd_values = np.full(
+            count,
+            np.nan,
+            dtype=float,
+        )
+
+        signal_values = np.full(
+            count,
+            np.nan,
+            dtype=float,
+        )
+
+        oscillator_values = np.full(
+            count,
+            np.nan,
+            dtype=float,
+        )
+
+        active_period = None
+
+        # 직전 관측 기간까지 확정된 EMA 상태
+        base_fast = None
+        base_slow = None
+        base_signal = None
+
+        # 현재 기간 마지막 가계산 상태
+        current_fast = None
+        current_slow = None
+        current_signal = None
+
+        for position, (period, price) in enumerate(
+            zip(periods, prices)
+        ):
+            if (
+                active_period is None
+                or period != active_period
+            ):
+                # 새 기간이 시작되면 직전 기간의 마지막 상태 확정
+                if active_period is not None:
+                    base_fast = current_fast
+                    base_slow = current_slow
+                    base_signal = current_signal
+
+                active_period = period
+
+            if base_fast is None:
+                # 첫 관측 기간은 adjust=False EMA 초기화와 동일
+                current_fast = float(price)
+                current_slow = float(price)
+
+                current_macd = 0.0
+                current_signal = 0.0
+
+            else:
+                current_fast = (
+                    alpha_fast * price
+                    + (1.0 - alpha_fast) * base_fast
+                )
+
+                current_slow = (
+                    alpha_slow * price
+                    + (1.0 - alpha_slow) * base_slow
+                )
+
+                current_macd = (
+                    current_fast - current_slow
+                )
+
+                current_signal = (
+                    alpha_signal * current_macd
+                    + (1.0 - alpha_signal) * base_signal
+                )
+
+            macd_values[position] = current_macd
+
+            signal_values[position] = (
+                current_signal
+            )
+
+            oscillator_values[position] = (
+                current_macd - current_signal
+            )
+
+        result[f"{prefix}_MACD"] = (
+            macd_values
+        )
+
+        result[f"{prefix}_Signal"] = (
+            signal_values
+        )
+
+        result[f"{prefix}_Oscillator"] = (
+            oscillator_values
+        )
+
+        previous = previous_period_values(
+            result[f"{prefix}_Oscillator"],
+            frequency,
+        )
+
+        result[
+            f"{prefix}_Previous_Oscillator"
+        ] = previous
+
+        result[
+            f"{prefix}_Oscillator_Change"
+        ] = (
+            result[f"{prefix}_Oscillator"]
+            - previous
+        )
 
         return result
 
     @staticmethod
+    def add_weekly_macd(df):
+        """
+        각 거래일 당시의 이번 주 MACD를 계산합니다.
+
+        전주 비교:
+            W-FRI 기준 직전 주의 마지막 관측값
+        """
+        params = (
+            TechnicalIndicator.TIMEFRAME_PARAMS[
+                "weekly"
+            ]
+        )
+
+        return TechnicalIndicator._add_period_macd_asof(
+            df,
+            prefix="Weekly",
+            frequency="W-FRI",
+            fast=params["fast"],
+            slow=params["slow"],
+            signal=params["signal"],
+        )
+
+    @staticmethod
     def add_monthly_macd(df):
         """
-        기존 월간 계산 방식 유지.
+        각 거래일 당시의 이번 달 MACD를 계산합니다.
 
-        같은 월의 모든 날짜에 해당 월의 마지막 가용 종가로
-        계산한 월간 값을 배정합니다.
+        전월 비교:
+            직전 달의 마지막 관측값
         """
-        monthly = (
-            df[["종가"]]
-            .resample("ME")
-            .last()
+        params = (
+            TechnicalIndicator.TIMEFRAME_PARAMS[
+                "monthly"
+            ]
         )
 
-        monthly = TechnicalIndicator.macd(
-            monthly,
-            timeframe="monthly",
+        return TechnicalIndicator._add_period_macd_asof(
+            df,
+            prefix="Monthly",
+            frequency="M",
+            fast=params["fast"],
+            slow=params["slow"],
+            signal=params["signal"],
         )
-
-        monthly = monthly.rename(
-            columns={
-                "MACD": "Monthly_MACD",
-                "Signal": "Monthly_Signal",
-                "Oscillator": "Monthly_Oscillator",
-            }
-        )
-
-        columns = [
-            "Monthly_MACD",
-            "Monthly_Signal",
-            "Monthly_Oscillator",
-        ]
-
-        monthly = monthly[columns].copy()
-
-        monthly.index = (
-            monthly.index.to_period("M")
-        )
-
-        result = df.copy()
-
-        periods = result.index.to_period(
-            "M"
-        )
-
-        for column in columns:
-            result[column] = periods.map(
-                monthly[column]
-            )
-
-        return result
 
 
 # =========================================================
@@ -597,95 +791,112 @@ class TechnicalIndicator:
 class SignalGenerator:
 
     @staticmethod
-    def calculate_trend(osc_series):
+    def trend_from_change(change):
         """
-         1: Oscillator 증가
-        -1: Oscillator 감소
-         0: 변화 없음
+         1: 증가
+        -1: 감소
+         0: 동일 또는 비교값 없음
         """
+        numeric = to_numeric(change)
+
         trend = pd.Series(
             0,
-            index=osc_series.index,
+            index=change.index,
             dtype=int,
         )
 
-        diff = osc_series.diff()
-
-        trend.loc[diff > 0] = 1
-        trend.loc[diff < 0] = -1
+        trend.loc[numeric > 0] = 1
+        trend.loc[numeric < 0] = -1
 
         return trend
 
     @staticmethod
-    def maintain_weekly_trend(df):
-        """기존 방식대로 주간 추세를 같은 주 전체에 배정."""
-        result = df.copy()
-
-        result["_year_week"] = (
-            result.index.to_period("W-FRI")
-        )
-
-        weekly_trend = (
-            result.groupby("_year_week")["Weekly_Trend"]
-            .apply(
-                lambda values: (
-                    values.loc[values != 0].iloc[0]
-                    if (values != 0).any()
-                    else np.nan
-                )
-            )
-            .ffill()
-            .fillna(0)
-            .astype(int)
-        )
-
-        result["Weekly_Trend"] = (
-            result["_year_week"]
-            .map(weekly_trend)
-            .astype(int)
-        )
-
-        return result.drop(
-            columns=["_year_week"]
+    def calculate_trend(osc_series):
+        """일간 등 인접 행 간 증감으로 추세를 계산합니다."""
+        return SignalGenerator.trend_from_change(
+            to_numeric(osc_series).diff()
         )
 
     @staticmethod
-    def maintain_monthly_trend(df):
-        """기존 방식대로 월간 추세를 같은 월 전체에 배정."""
+    def maintain_weekly_trend(df):
+        """
+        기존 함수명 호환용.
+
+        과거처럼 주 전체를 한 방향으로 덮어쓰지 않습니다.
+        각 날짜의 이번 주 값과 전주 값을 비교합니다.
+        """
         result = df.copy()
 
-        result["_year_month"] = (
-            result.index.to_period("M")
+        previous = previous_period_values(
+            result["Weekly_Oscillator"],
+            "W-FRI",
         )
 
-        monthly_trend = (
-            result.groupby("_year_month")["Monthly_Trend"]
-            .apply(
-                lambda values: (
-                    values.loc[values != 0].iloc[0]
-                    if (values != 0).any()
-                    else np.nan
-                )
+        change = (
+            to_numeric(
+                result["Weekly_Oscillator"]
             )
-            .ffill()
-            .fillna(0)
-            .astype(int)
+            - previous
+        )
+
+        result["Weekly_Previous_Oscillator"] = (
+            previous
+        )
+
+        result["Weekly_Oscillator_Change"] = (
+            change
+        )
+
+        result["Weekly_Trend"] = (
+            SignalGenerator.trend_from_change(
+                change
+            )
+        )
+
+        return result
+
+    @staticmethod
+    def maintain_monthly_trend(df):
+        """
+        기존 함수명 호환용.
+
+        과거처럼 월 전체를 한 방향으로 덮어쓰지 않습니다.
+        각 날짜의 이번 달 값과 전월 값을 비교합니다.
+        """
+        result = df.copy()
+
+        previous = previous_period_values(
+            result["Monthly_Oscillator"],
+            "M",
+        )
+
+        change = (
+            to_numeric(
+                result["Monthly_Oscillator"]
+            )
+            - previous
+        )
+
+        result["Monthly_Previous_Oscillator"] = (
+            previous
+        )
+
+        result["Monthly_Oscillator_Change"] = (
+            change
         )
 
         result["Monthly_Trend"] = (
-            result["_year_month"]
-            .map(monthly_trend)
-            .astype(int)
+            SignalGenerator.trend_from_change(
+                change
+            )
         )
 
-        return result.drop(
-            columns=["_year_month"]
-        )
+        return result
 
     @staticmethod
     def identify_signal_changes(trend_series):
         """
-        엄격한 추세 전환.
+        단독 신호의 엄격한 추세 전환 규칙 유지.
 
         매수: -1 → +1
         매도: +1 → -1
@@ -708,28 +919,50 @@ class SignalGenerator:
 
     @staticmethod
     def identify_weekly_monthly_signals(df):
-        previous_monthly = (
-            df["Monthly_Trend"].shift(1)
+        """
+        요청한 주간·월간 결합 조건.
+
+        매수:
+            이번 달 Oscillator > 전월 Oscillator
+            AND
+            이번 주 Oscillator > 전주 Oscillator
+
+        매도:
+            이번 달 Oscillator < 전월 Oscillator
+            AND
+            이번 주 Oscillator < 전주 Oscillator
+
+        추세 전환 여부와 Oscillator의 부호는 검사하지 않습니다.
+        조건을 만족하는 날짜마다 True를 반환합니다.
+        """
+        weekly_previous = previous_period_values(
+            df["Weekly_Oscillator"],
+            "W-FRI",
         )
 
-        monthly_turn_up = (
-            previous_monthly.le(0)
-            & df["Monthly_Trend"].eq(1)
+        monthly_previous = previous_period_values(
+            df["Monthly_Oscillator"],
+            "M",
         )
 
-        monthly_turn_down = (
-            previous_monthly.ge(0)
-            & df["Monthly_Trend"].eq(-1)
+        weekly_change = (
+            to_numeric(df["Weekly_Oscillator"])
+            - weekly_previous
+        )
+
+        monthly_change = (
+            to_numeric(df["Monthly_Oscillator"])
+            - monthly_previous
         )
 
         buy = (
-            df["Weekly_Trend"].eq(1)
-            & monthly_turn_up
+            monthly_change.gt(0)
+            & weekly_change.gt(0)
         )
 
         sell = (
-            df["Weekly_Trend"].eq(-1)
-            & monthly_turn_down
+            monthly_change.lt(0)
+            & weekly_change.lt(0)
         )
 
         return buy, sell
@@ -738,17 +971,28 @@ class SignalGenerator:
     def add_signals(df):
         result = df.copy()
 
-        for prefix in (
-            "Daily",
-            "Weekly",
-            "Monthly",
-        ):
-            result[f"{prefix}_Trend"] = (
-                SignalGenerator.calculate_trend(
-                    result[f"{prefix}_Oscillator"]
-                )
+        required = {
+            "Daily_Oscillator",
+            "Weekly_Oscillator",
+            "Monthly_Oscillator",
+        }
+
+        missing = required - set(result.columns)
+
+        if missing:
+            raise ValueError(
+                "신호 계산용 지표 컬럼 누락: "
+                + ", ".join(sorted(missing))
             )
 
+        # 일간은 전일 대비 증감
+        result["Daily_Trend"] = (
+            SignalGenerator.calculate_trend(
+                result["Daily_Oscillator"]
+            )
+        )
+
+        # 주간은 전주 대비, 월간은 전월 대비 증감
         result = (
             SignalGenerator.maintain_weekly_trend(
                 result
@@ -761,6 +1005,7 @@ class SignalGenerator:
             )
         )
 
+        # 단독 신호는 기존 엄격한 방향 전환 규칙 유지
         for prefix in (
             "Daily",
             "Weekly",
@@ -780,6 +1025,7 @@ class SignalGenerator:
                 sell.astype(int)
             )
 
+        # 결합 신호는 전환이 아닌 동시 증감 조건
         combined_buy, combined_sell = (
             SignalGenerator.identify_weekly_monthly_signals(
                 result
@@ -792,6 +1038,21 @@ class SignalGenerator:
 
         result["Weekly_Monthly_Sell"] = (
             combined_sell.astype(int)
+        )
+
+        result["Weekly_Monthly_Condition"] = (
+            np.select(
+                [
+                    combined_buy,
+                    combined_sell,
+                ],
+                [
+                    1,
+                    -1,
+                ],
+                default=0,
+            )
+            .astype(int)
         )
 
         return result
@@ -811,17 +1072,45 @@ class Backtester:
         price_col="종가",
     ):
         """
-        기존 백테스트 계산 방식 유지.
-
-        - 신호 발생일 종가 매수·매도
+        - 신호 발생일 종가 매수·매도 가정
         - 한 번에 한 포지션
+        - 반복 매수 조건은 추가 매수하지 않음
         - 미청산 포지션 제외
         - 수수료·세금·슬리피지 제외
         """
-        trades = []
-
         buy_col = f"{signal_type}_Buy"
         sell_col = f"{signal_type}_Sell"
+
+        required = {
+            buy_col,
+            sell_col,
+            price_col,
+        }
+
+        if monthly_filter is not None:
+            required.add("Monthly_Trend")
+
+        missing = required - set(df.columns)
+
+        if missing:
+            raise ValueError(
+                "백테스트 컬럼 누락: "
+                + ", ".join(sorted(missing))
+            )
+
+        trade_columns = [
+            "전략",
+            "매수일",
+            "매수가",
+            "매도일",
+            "매도가",
+            "수익률(%)",
+            "수익(원)",
+            "보유기간(일)",
+            "청산사유",
+        ]
+
+        trades = []
 
         in_position = False
         entry_date = None
@@ -858,15 +1147,22 @@ class Backtester:
                 "청산사유": reason,
             }
 
-        for index in range(len(df)):
-            current_date = df.index[index]
-            current_price = (
-                df[price_col].iloc[index]
+        for position in range(len(df)):
+            current_date = df.index[position]
+
+            current_price = float(
+                df[price_col].iloc[position]
             )
+
+            if (
+                not np.isfinite(current_price)
+                or current_price <= 0
+            ):
+                continue
 
             if monthly_filter is not None:
                 current_monthly = (
-                    df["Monthly_Trend"].iloc[index]
+                    df["Monthly_Trend"].iloc[position]
                 )
 
                 if current_monthly != monthly_filter:
@@ -884,7 +1180,7 @@ class Backtester:
                     continue
 
             if (
-                df[buy_col].iloc[index] == 1
+                df[buy_col].iloc[position] == 1
                 and not in_position
             ):
                 entry_date = current_date
@@ -892,7 +1188,7 @@ class Backtester:
                 in_position = True
 
             elif (
-                df[sell_col].iloc[index] == 1
+                df[sell_col].iloc[position] == 1
                 and in_position
             ):
                 trades.append(
@@ -905,7 +1201,10 @@ class Backtester:
 
                 in_position = False
 
-        return pd.DataFrame(trades)
+        return pd.DataFrame(
+            trades,
+            columns=trade_columns,
+        )
 
     @staticmethod
     def calculate_metrics(
@@ -920,7 +1219,8 @@ class Backtester:
 
         손익비:
             abs(순수익 합계 / 손실 거래의 손익 합계)
-            일반적인 Profit Factor와 다른 기존 계산식입니다.
+
+        일반적인 Profit Factor와 다른 기존 계산식입니다.
         """
         if trades_df.empty:
             return {
@@ -969,7 +1269,9 @@ class Backtester:
             "총거래수": count,
             "승리": len(win),
             "패배": len(loss),
-            "중립": count - len(win) - len(loss),
+            "중립": (
+                count - len(win) - len(loss)
+            ),
             "승률(%)": round(
                 len(win) / count * 100,
                 1,
@@ -1042,24 +1344,16 @@ def get_recent_signal(
     days=RECENT_SIGNAL_DAYS,
     reference_date=None,
 ):
-    """
-    기준일 포함 최근 days일의 마지막 신호.
-
-    days는 달력일 기준입니다.
-    """
+    """기준일 포함 최근 days일의 마지막 조건 신호."""
     empty_result = {
         "신호": "신호 없음",
         "발생일": None,
     }
 
-    if (
-        not isinstance(days, (int, np.integer))
-        or isinstance(days, (bool, np.bool_))
-        or days < 1
-    ):
-        raise ValueError(
-            "신호 조회 일수는 1 이상의 정수여야 합니다."
-        )
+    days = validate_positive_integer(
+        days,
+        "신호 조회 일수는 1 이상의 정수여야 합니다.",
+    )
 
     if df is None or df.empty:
         return empty_result
@@ -1092,17 +1386,18 @@ def get_recent_signal(
             .tz_localize(None)
         )
 
-    frame = frame.loc[
-        ~frame.index.isna()
-    ].sort_index()
+    frame = (
+        frame.loc[
+            ~frame.index.isna()
+        ]
+        .sort_index()
+    )
 
     if frame.empty:
         return empty_result
 
     if reference_date is None:
-        reference_date = (
-            frame.index.max()
-        )
+        reference_date = frame.index.max()
 
     reference = normalize_timestamp(
         reference_date
@@ -1110,7 +1405,7 @@ def get_recent_signal(
 
     start_date = (
         reference
-        - pd.Timedelta(days=int(days) - 1)
+        - pd.Timedelta(days=days - 1)
     )
 
     dates = frame.index.normalize()
@@ -1132,11 +1427,9 @@ def get_recent_signal(
     if recent.empty:
         return empty_result
 
-    last_row = recent.iloc[-1]
-
     return {
         "신호": classify_signal(
-            last_row,
+            recent.iloc[-1],
             buy_col,
             sell_col,
         ),
@@ -1153,10 +1446,13 @@ def recent_signals(
     limit=10,
 ):
     """
-    전체 분석 기간 중 최근 limit개 신호를 반환합니다.
+    전체 기간 중 최근 limit개 조건 신호 행을 반환합니다.
 
-    최근 5일로 제한하는 함수가 아닙니다.
-    기존 app.py와 호환되도록 날짜 오름차순으로 반환합니다.
+    날짜 오름차순으로 반환하므로 기존 app.py와 호환됩니다.
+
+    결합 조건이 여러 날 유지되면
+    같은 방향 신호가 여러 행 표시될 수 있습니다.
+    실제 체결 기록과는 다른 표입니다.
     """
     prefix = (
         "Weekly_Monthly"
@@ -1300,10 +1596,7 @@ def prepare_price_frame(frame):
             .tz_localize(None)
         )
 
-    df.index = (
-        df.index.normalize()
-    )
-
+    df.index = df.index.normalize()
     df.index.name = "날짜"
 
     df = df.sort_index()
@@ -1356,33 +1649,14 @@ def analyze_frame(
         trades
         latest
         messages
-
-    기존 app.py 호출 방식과 호환됩니다.
     """
-    if (
-        not isinstance(
-            recent_signal_days,
-            (int, np.integer),
-        )
-        or isinstance(
-            recent_signal_days,
-            (bool, np.bool_),
-        )
-        or recent_signal_days < 1
-    ):
-        raise ValueError(
-            "최근 신호 조회 일수는 "
-            "1 이상의 정수여야 합니다."
-        )
-
-    recent_signal_days = int(
-        recent_signal_days
+    recent_signal_days = validate_positive_integer(
+        recent_signal_days,
+        "최근 신호 조회 일수는 "
+        "1 이상의 정수여야 합니다.",
     )
 
-    df = prepare_price_frame(
-        frame
-    )
-
+    df = prepare_price_frame(frame)
     messages = []
 
     # -----------------------------------------------------
@@ -1393,7 +1667,6 @@ def analyze_frame(
         excel_file is not None
         and str(excel_file) != ""
     ):
-        # 내부에서 엑셀 검증 및 재무 데이터 읽기를 수행합니다.
         df = (
             FinancialDataManager.add_quarter_and_target_price(
                 df,
@@ -1520,21 +1793,18 @@ def analyze_frame(
         "종가": float(
             latest_row["종가"]
         ),
-
         "Weekly 신호": (
             weekly_recent["신호"]
         ),
         "Weekly 신호일": (
             weekly_recent["발생일"]
         ),
-
         "Weekly+Monthly 신호": (
             combined_recent["신호"]
         ),
         "Weekly+Monthly 신호일": (
             combined_recent["발생일"]
         ),
-
         "신호 조회 시작일": (
             signal_start.strftime("%Y-%m-%d")
         ),
@@ -1544,7 +1814,6 @@ def analyze_frame(
         "신호 조회 일수": (
             recent_signal_days
         ),
-
         "당일 Weekly 신호": classify_signal(
             latest_row,
             "Weekly_Buy",
