@@ -2330,9 +2330,9 @@ except Exception as error:
 # 왼쪽: 설정
 # =========================================================
 
-def save_watch_group(path, watch_stocks):
+def save_group_section(path, group_name, items):
     """
-    stocks.txt의 [관심] 섹션만 교체하고
+    stocks.txt의 [그룹명] 섹션만 교체하고
     나머지 그룹과 주석은 그대로 유지합니다.
 
     항목 형식: (종목명, 종목코드) 튜플 목록
@@ -2341,45 +2341,130 @@ def save_watch_group(path, watch_stocks):
         encoding="utf-8-sig"
     ).splitlines()
 
+    section_header = f"[{group_name}]"
+
     new_lines = []
-    in_watch = False
-    watch_written = False
+    in_section = False
+    section_written = False
 
     for line in lines:
         stripped = line.strip()
 
         if stripped.startswith("[") and stripped.endswith("]"):
-            if in_watch and not watch_written:
-                for name, ticker in watch_stocks:
+            if in_section and not section_written:
+                for name, ticker in items:
                     new_lines.append(f"{name},{ticker}")
-                watch_written = True
+                section_written = True
 
-            in_watch = stripped == "[관심]"
+            in_section = stripped == section_header
             new_lines.append(line)
             continue
 
-        if in_watch:
+        if in_section:
             continue
 
         new_lines.append(line)
 
-    if in_watch and not watch_written:
-        for name, ticker in watch_stocks:
+    if in_section and not section_written:
+        for name, ticker in items:
             new_lines.append(f"{name},{ticker}")
+        section_written = True
 
-    if not watch_written:
+    if not section_written:
         new_lines.extend(
-            ["", "[관심]"]
-            + [
-                f"{name},{ticker}"
-                for name, ticker in watch_stocks
-            ]
+            ["", section_header]
+            + [f"{name},{ticker}" for name, ticker in items]
         )
 
     path.write_text(
         "\n".join(new_lines) + "\n",
         encoding="utf-8",
     )
+
+
+def save_watch_group(path, watch_stocks):
+    """[관심] 섹션 교체 — save_group_section의 래퍼입니다."""
+    save_group_section(
+        path,
+        "관심",
+        watch_stocks,
+    )
+
+
+def render_group_reorder(group_name, items):
+    """
+    그룹 종목의 순서를 ↑ / ↓ 버튼으로 바꾸고
+    즉시 stocks.txt에 저장합니다.
+    """
+    if not items:
+        st.info(f"[{group_name}] 그룹이 비어 있습니다.")
+        return
+
+    safe_group = re.sub(
+        r"\W+",
+        "_",
+        group_name,
+    )
+
+    for order_index, item in enumerate(items):
+        name, ticker = item
+
+        left, middle, right = st.columns([5, 1, 1])
+
+        with left:
+            st.markdown(
+                f'<div style="padding:6px 0;'
+                'font-weight:600;">'
+                f'{escape(str(order_index + 1))}. '
+                f'{escape(name)} '
+                '<span style="color:#808080;'
+                'font-size:13px;font-weight:400;">'
+                f'({escape(ticker)})'
+                '</span></div>',
+                unsafe_allow_html=True,
+            )
+
+        with middle:
+            if st.button(
+                "⬆️",
+                key=f"reorder_{safe_group}_up_{order_index}",
+                disabled=(order_index == 0),
+                use_container_width=True,
+            ):
+                reordered = list(items)
+                reordered[order_index - 1], reordered[order_index] = (
+                    reordered[order_index],
+                    reordered[order_index - 1],
+                )
+
+                save_group_section(
+                    STOCKS_FILE,
+                    group_name,
+                    reordered,
+                )
+
+                st.rerun()
+
+        with right:
+            if st.button(
+                "⬇️",
+                key=f"reorder_{safe_group}_down_{order_index}",
+                disabled=(order_index == len(items) - 1),
+                use_container_width=True,
+            ):
+                reordered = list(items)
+                reordered[order_index + 1], reordered[order_index] = (
+                    reordered[order_index],
+                    reordered[order_index + 1],
+                )
+
+                save_group_section(
+                    STOCKS_FILE,
+                    group_name,
+                    reordered,
+                )
+
+                st.rerun()
 
 
 with st.sidebar:
@@ -2481,78 +2566,10 @@ with st.sidebar:
 
         st.markdown("**순서 변경**")
 
-        if watch_stocks:
-            for order_index, item in enumerate(
-                watch_stocks
-            ):
-                name, ticker = item
-
-                left, middle, right = st.columns(
-                    [5, 1, 1]
-                )
-
-                with left:
-                    st.markdown(
-                        f'<div style="padding:6px 0;'
-                        'font-weight:600;">'
-                        f'{escape(str(order_index + 1))}. '
-                        f'{escape(name)} '
-                        '<span style="color:#808080;'
-                        'font-size:13px;font-weight:400;">'
-                        f'({escape(ticker)})'
-                        '</span></div>',
-                        unsafe_allow_html=True,
-                    )
-
-                with middle:
-                    if st.button(
-                        "↑",
-                        key=f"watch_up_{order_index}",
-                        disabled=(order_index == 0),
-                        use_container_width=True,
-                    ):
-                        reordered = list(watch_stocks)
-                        reordered[
-                            order_index - 1
-                        ], reordered[order_index] = (
-                            reordered[order_index],
-                            reordered[order_index - 1],
-                        )
-
-                        save_watch_group(
-                            STOCKS_FILE,
-                            reordered,
-                        )
-
-                        st.rerun()
-
-                with right:
-                    if st.button(
-                        "↓",
-                        key=f"watch_down_{order_index}",
-                        disabled=(
-                            order_index
-                            == len(watch_stocks) - 1
-                        ),
-                        use_container_width=True,
-                    ):
-                        reordered = list(watch_stocks)
-                        reordered[
-                            order_index + 1
-                        ], reordered[order_index] = (
-                            reordered[order_index],
-                            reordered[order_index + 1],
-                        )
-
-                        save_watch_group(
-                            STOCKS_FILE,
-                            reordered,
-                        )
-
-                        st.rerun()
-
-        else:
-            st.info("관심 그룹이 비어 있습니다.")
+        render_group_reorder(
+            "관심",
+            watch_stocks,
+        )
 
         if st.button("관심 그룹 저장"):
             updated_watch = [
@@ -2571,6 +2588,21 @@ with st.sidebar:
             )
 
             st.rerun()
+
+    # -----------------------------------------------------
+    # 다른 그룹 순서 변경: 보유·매매 후보 등 모든 그룹 지원
+    # -----------------------------------------------------
+
+    with st.expander("다른 그룹 순서 변경"):
+        reorder_group = st.selectbox(
+            "그룹 선택",
+            options=list(stock_groups),
+        )
+
+        render_group_reorder(
+            reorder_group,
+            stock_groups.get(reorder_group, []),
+        )
 
     with st.form("batch_analysis_form"):
         selected_stocks = st.multiselect(
