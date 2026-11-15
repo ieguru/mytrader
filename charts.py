@@ -2,34 +2,58 @@
 """
 5패널 종합차트를 고해상도 PNG bytes로 반환합니다.
 
-패널 1: 주가·목표가·매매 신호
-패널 2: 거래량
-패널 3: 일간·주간·월간 MACD Oscillator
-패널 4: 외국인·기관·개인 누적 순매수 수량
-패널 5: 매출액·영업이익·순이익
+패널 1:
+    주가·목표가·매매 신호
+
+패널 2:
+    거래량
+
+패널 3:
+    일간·주간·월간 MACD Oscillator
+
+패널 4:
+    외국인·기관·개인 누적 순매수 수량
+
+패널 5:
+    분기 매출액·영업이익·순이익
 
 표시 기간:
     마지막 가격 데이터 날짜 기준 최근 18개월
 
 분기 재무:
-    모든 패널과 같은 날짜 축 사용
-    표시 기간 안에 종료된 최근 6개 분기만 표시
-    진행 중인 분기 및 미래 분기는 제외
+    모든 패널과 같은 날짜 축을 사용합니다.
+    진행 중인 분기를 포함한 최근 6개 분기를 표시합니다.
+    각 분기 시작월의 첫 가용 거래일 위치에 표시합니다.
+    아직 시작하지 않은 미래 분기는 제외합니다.
+
+    종료 분기:
+        매출액: 회색 채움 막대
+        영업이익·순이익: 실선, 채운 마커
+
+    진행 중인 분기:
+        매출액: 연한 회색 빗금 막대
+        영업이익·순이익: 점선, 빈 마커
+        분기명에 '(예상)' 표시
 
 주의:
-    원본 엑셀에 실적/예측 구분이 없으므로
+    분기 시작 위치는 시각적 배치입니다.
+    해당 날짜에 실적이 공개되었다는 의미가 아닙니다.
+
+    엑셀에 공시일·실적/추정 구분이 없으므로,
+    종료 분기는 실적 표시로 간주합니다.
     종료된 분기에 입력된 예측값까지 판별하지는 않습니다.
 
-    투자자 누적 순매수는 전체 조회 기간에서 계산한 후
+    투자자 누적 순매수는 전체 조회 기간에서 계산하고,
     표시 구간만 최근 18개월로 제한합니다.
 
-공매도 및 대차거래 데이터는 사용하지 않습니다.
+    공매도 및 대차거래 데이터는 사용하지 않습니다.
 """
 
 import io
 import os
 import platform
 import threading
+
 from pathlib import Path
 
 import matplotlib
@@ -37,23 +61,28 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+
 from matplotlib import font_manager
+from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter
 
 import numpy as np
 import pandas as pd
 
 
+# =========================================================
+# 기본 설정
+# =========================================================
+
 _CHART_LOCK = threading.RLock()
 
-# 실제 엑셀 금액 단위에 맞춰 변경하세요.
-# 축의 표시만 바꾸며 숫자를 환산하지 않습니다.
+# 축의 단위 표시만 변경하며 숫자를 환산하지 않습니다.
+# 모든 재무 입력값이 억원 단위라면 "억원"으로 변경하세요.
 FINANCIAL_UNIT_LABEL = "엑셀 입력 단위"
 
 DISPLAY_MONTHS = 18
 FINANCIAL_QUARTERS = 6
 
-# 직전 코드의 MACD 선 두께 1.3 기준
 DAILY_MACD_LINEWIDTH = 0.65
 WEEKLY_MACD_LINEWIDTH = 1.30
 MONTHLY_MACD_LINEWIDTH = 2.60
@@ -79,8 +108,14 @@ def to_numeric(series):
         )
 
     return (
-        pd.to_numeric(series, errors="coerce")
-        .replace([np.inf, -np.inf], np.nan)
+        pd.to_numeric(
+            series,
+            errors="coerce",
+        )
+        .replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
         .astype(float)
     )
 
@@ -160,7 +195,10 @@ class ChartPlotter:
 
         if system == "Windows":
             windows_dir = Path(
-                os.environ.get("WINDIR", r"C:\Windows")
+                os.environ.get(
+                    "WINDIR",
+                    r"C:\Windows",
+                )
             )
 
             candidates.extend([
@@ -174,7 +212,9 @@ class ChartPlotter:
                     "/System/Library/Fonts/"
                     "Supplemental/AppleGothic.ttf"
                 ),
-                Path("/Library/Fonts/AppleGothic.ttf"),
+                Path(
+                    "/Library/Fonts/AppleGothic.ttf"
+                ),
             ])
 
         else:
@@ -197,19 +237,31 @@ class ChartPlotter:
                 str(font_path)
             )
 
-            font_name = font_manager.FontProperties(
-                fname=str(font_path)
-            ).get_name()
+            font_name = (
+                font_manager.FontProperties(
+                    fname=str(font_path)
+                )
+                .get_name()
+            )
 
-            plt.rcParams["font.family"] = [font_name]
-            plt.rcParams["font.sans-serif"] = [font_name]
-            plt.rcParams["axes.unicode_minus"] = False
+            plt.rcParams["font.family"] = [
+                font_name
+            ]
+
+            plt.rcParams["font.sans-serif"] = [
+                font_name
+            ]
+
+            plt.rcParams[
+                "axes.unicode_minus"
+            ] = False
 
             return font_name
 
         installed = {
             font.name
-            for font in font_manager.fontManager.ttflist
+            for font
+            in font_manager.fontManager.ttflist
         }
 
         for font_name in (
@@ -223,9 +275,17 @@ class ChartPlotter:
             if font_name not in installed:
                 continue
 
-            plt.rcParams["font.family"] = [font_name]
-            plt.rcParams["font.sans-serif"] = [font_name]
-            plt.rcParams["axes.unicode_minus"] = False
+            plt.rcParams["font.family"] = [
+                font_name
+            ]
+
+            plt.rcParams["font.sans-serif"] = [
+                font_name
+            ]
+
+            plt.rcParams[
+                "axes.unicode_minus"
+            ] = False
 
             return font_name
 
@@ -243,7 +303,9 @@ class ChartPlotter:
     @staticmethod
     def prepare_chart_frame(df):
         if df is None or df.empty:
-            raise ValueError("차트 데이터가 없습니다.")
+            raise ValueError(
+                "차트 데이터가 없습니다."
+            )
 
         frame = df.copy()
 
@@ -252,7 +314,10 @@ class ChartPlotter:
                 "차트 데이터에 중복된 컬럼이 있습니다."
             )
 
-        if isinstance(frame.index, pd.DatetimeIndex):
+        if isinstance(
+            frame.index,
+            pd.DatetimeIndex,
+        ):
             dates = frame.index
 
         elif "날짜" in frame.columns:
@@ -276,7 +341,8 @@ class ChartPlotter:
 
         else:
             raise ValueError(
-                "날짜 인덱스 또는 '날짜' 컬럼이 필요합니다."
+                "날짜 인덱스 또는 "
+                "'날짜' 컬럼이 필요합니다."
             )
 
         if dates.tz is not None:
@@ -295,7 +361,9 @@ class ChartPlotter:
         frame = frame.sort_index()
 
         frame = frame.loc[
-            ~frame.index.duplicated(keep="last")
+            ~frame.index.duplicated(
+                keep="last"
+            )
         ].copy()
 
         if frame.empty:
@@ -311,7 +379,9 @@ class ChartPlotter:
             "거래량",
         }
 
-        missing = required - set(frame.columns)
+        missing = required - set(
+            frame.columns
+        )
 
         if missing:
             raise ValueError(
@@ -327,11 +397,14 @@ class ChartPlotter:
         frame["날짜"] = frame.index
 
         frame["분기"] = [
-            f"{date.year}.{(date.month - 1) // 3 + 1}Q"
-            for date in frame.index
+            (
+                f"{timestamp.year}."
+                f"{(timestamp.month - 1) // 3 + 1}Q"
+            )
+            for timestamp in frame.index
         ]
 
-        # 표시 구간을 자르기 전에 전체 조회 기간을 누적합니다.
+        # 표시 기간을 자르기 전에 전체 조회 기간을 누적합니다.
         for source, target in VOLUME_COLUMNS.items():
             if source not in frame.columns:
                 continue
@@ -342,7 +415,8 @@ class ChartPlotter:
 
             frame[source] = values
 
-            # 누락 이후 정확한 누적값은 알 수 없으므로 NaN 유지
+            # 누락값을 0으로 대체하지 않습니다.
+            # 누락 이후 정확한 누적값은 알 수 없으므로 NaN 유지.
             frame[target] = values.cumsum(
                 skipna=False
             )
@@ -355,11 +429,15 @@ class ChartPlotter:
         if df is None or df.empty:
             return pd.DataFrame()
 
-        reference_date = df.index.max().normalize()
+        reference_date = (
+            df.index.max().normalize()
+        )
 
         cutoff = (
             reference_date
-            - pd.DateOffset(months=DISPLAY_MONTHS)
+            - pd.DateOffset(
+                months=DISPLAY_MONTHS
+            )
         )
 
         return (
@@ -374,20 +452,32 @@ class ChartPlotter:
     @staticmethod
     def filter_last_2_years(df):
         """
-        이전 외부 호출과의 호환용 함수.
+        이전 외부 호출과의 호환용 함수입니다.
 
-        이름과 관계없이 현재 표시 기준인 최근 18개월을 적용합니다.
+        이름과 관계없이 현재 표시 기준인
+        최근 18개월을 적용합니다.
         """
-        return ChartPlotter.filter_recent_period(df)
+        return ChartPlotter.filter_recent_period(
+            df
+        )
 
     # -----------------------------------------------------
-    # 패널 1: 주가·목표가·신호
+    # 패널 1: 주가·목표가·매매 신호
     # -----------------------------------------------------
 
     @staticmethod
-    def plot_candlestick(ax, df, width=0.6):
+    def plot_candlestick(
+        ax,
+        df,
+        width=0.6,
+    ):
         plot_df = df.dropna(
-            subset=["시가", "고가", "저가", "종가"]
+            subset=[
+                "시가",
+                "고가",
+                "저가",
+                "종가",
+            ]
         )
 
         if plot_df.empty:
@@ -406,8 +496,16 @@ class ChartPlotter:
         ]
 
         for subset, color, edgecolor in (
-            (up, "#dc2626", "#991b1b"),
-            (down, "#2563eb", "#1e40af"),
+            (
+                up,
+                "#dc2626",
+                "#991b1b",
+            ),
+            (
+                down,
+                "#2563eb",
+                "#1e40af",
+            ),
         ):
             if subset.empty:
                 continue
@@ -426,7 +524,8 @@ class ChartPlotter:
             ].min(axis=1)
 
             height = (
-                subset["종가"] - subset["시가"]
+                subset["종가"]
+                - subset["시가"]
             ).abs()
 
             ax.bar(
@@ -521,10 +620,13 @@ class ChartPlotter:
                 errors="coerce",
             )
 
-            subset = df.loc[
-                signals.eq(1)
-            ].dropna(
-                subset=[price_column]
+            subset = (
+                df.loc[
+                    signals.eq(1)
+                ]
+                .dropna(
+                    subset=[price_column]
+                )
             )
 
             if subset.empty:
@@ -543,10 +645,15 @@ class ChartPlotter:
             )
 
     @staticmethod
-    def plot_price_panel(ax, df, stock_name):
+    def plot_price_panel(
+        ax,
+        df,
+        stock_name,
+    ):
         set_panel_style(
             ax,
-            f"1. {stock_name} — 주가·목표가·매매 신호"
+            f"1. {stock_name} — "
+            "주가·목표가·매매 신호"
             f" / 최근 {DISPLAY_MONTHS}개월",
             "가격 (원)",
         )
@@ -557,9 +664,12 @@ class ChartPlotter:
         )
 
         if "목표가" in df.columns:
-            target = to_numeric(
-                df["목표가"]
-            ).clip(lower=0)
+            target = (
+                to_numeric(
+                    df["목표가"]
+                )
+                .clip(lower=0)
+            )
 
             valid = target.dropna()
 
@@ -573,12 +683,20 @@ class ChartPlotter:
                     label="목표가",
                 )
 
-                last_index = valid.index[-1]
-                last_value = float(valid.iloc[-1])
+                last_index = (
+                    valid.index[-1]
+                )
+
+                last_value = float(
+                    valid.iloc[-1]
+                )
 
                 ax.annotate(
                     f"목표가 {last_value:,.0f}",
-                    xy=(last_index, last_value),
+                    xy=(
+                        last_index,
+                        last_value,
+                    ),
                     xytext=(-5, 6),
                     textcoords="offset points",
                     color="#c45a00",
@@ -676,7 +794,9 @@ class ChartPlotter:
         plotted = False
 
         x_values = (
-            df.index.to_numpy(dtype=float)
+            df.index.to_numpy(
+                dtype=float
+            )
         )
 
         for (
@@ -689,11 +809,16 @@ class ChartPlotter:
             if column not in df.columns:
                 continue
 
-            values = to_numeric(
-                df[column]
-            ).to_numpy(dtype=float)
+            values = (
+                to_numeric(
+                    df[column]
+                )
+                .to_numpy(dtype=float)
+            )
 
-            valid = np.isfinite(values)
+            valid = np.isfinite(
+                values
+            )
 
             if not valid.any():
                 continue
@@ -732,6 +857,7 @@ class ChartPlotter:
                 ncol=3,
                 fontsize=8,
             )
+
         else:
             panel_message(
                 ax,
@@ -739,7 +865,7 @@ class ChartPlotter:
             )
 
     # -----------------------------------------------------
-    # 패널 4: 누적 순매수 수량
+    # 패널 4: 외국인·기관·개인 누적 순매수 수량
     # -----------------------------------------------------
 
     @staticmethod
@@ -795,12 +921,20 @@ class ChartPlotter:
                 incomplete = True
                 continue
 
-            last_index = valid.index[-1]
-            last_value = float(valid.iloc[-1])
+            last_index = (
+                valid.index[-1]
+            )
+
+            last_value = float(
+                valid.iloc[-1]
+            )
 
             valid_dates.append(
                 pd.Timestamp(
-                    df.loc[last_index, "날짜"]
+                    df.loc[
+                        last_index,
+                        "날짜",
+                    ]
                 )
             )
 
@@ -809,7 +943,10 @@ class ChartPlotter:
                 values,
                 color=color,
                 linewidth=1.8,
-                label=f"{label} {last_value:,.0f}주",
+                label=(
+                    f"{label} "
+                    f"{last_value:,.0f}주"
+                ),
             )
 
             plotted = True
@@ -825,7 +962,8 @@ class ChartPlotter:
             panel_message(
                 ax,
                 "누적 순매수 수량을 표시할 수 없습니다.\n"
-                "투자자 데이터 포함 여부와 조회 누락을 확인하세요.",
+                "투자자 데이터 포함 여부와 "
+                "조회 누락을 확인하세요.",
             )
             return
 
@@ -838,7 +976,9 @@ class ChartPlotter:
 
         note = (
             "표시 시리즈의 공통 유효 종료일: "
-            + min(valid_dates).strftime("%Y-%m-%d")
+            + min(valid_dates).strftime(
+                "%Y-%m-%d"
+            )
         )
 
         if incomplete:
@@ -875,25 +1015,35 @@ class ChartPlotter:
         excel_file=None,
     ):
         """
-        동일 날짜 축에서 종료된 최근 6개 분기만 표시합니다.
+        분기 시작월에 재무값을 표시합니다.
 
-        매출액:
-            왼쪽 축, 회색 막대
+        진행 중인 분기를 포함한 최근 6개 분기를 대상으로 하며,
+        아직 시작하지 않은 미래 분기는 표시하지 않습니다.
 
-        영업이익·순이익:
-            오른쪽 축, 선그래프
+        종료 여부:
+            마지막 가격 데이터 날짜와 분기 종료일을 비교합니다.
 
-        분기 값의 표시 위치:
-            분기 종료일 이전 또는 당일의 마지막 가격 데이터 날짜
+        표시 위치:
+            분기 시작일 이후 첫 번째 가용 가격 데이터 날짜.
+            단, 해당 날짜가 분기 시작월 안에 있어야 합니다.
 
-        진행 중인 분기와 미래 분기는 제외합니다.
+        결측:
+            누락된 재무값을 0으로 대체하지 않습니다.
+            누락 분기를 건너뛰어 선을 연결하지 않습니다.
         """
         set_panel_style(
             ax,
-            "5. 분기 재무 — 매출액·영업이익·순이익"
-            " / 종료된 최근 6개 분기",
+            "5. 분기 재무 — 분기 시작 위치 표시"
+            f" / 진행 분기 포함 최근 {FINANCIAL_QUARTERS}개 분기",
             f"매출액\n({FINANCIAL_UNIT_LABEL})",
         )
+
+        if df is None or df.empty:
+            panel_message(
+                ax,
+                "표시할 가격 데이터가 없습니다.",
+            )
+            return
 
         if (
             not excel_file
@@ -904,6 +1054,10 @@ class ChartPlotter:
                 "재무 엑셀 파일이 없습니다.",
             )
             return
+
+        # -------------------------------------------------
+        # 1. 재무 엑셀 읽기 및 검증
+        # -------------------------------------------------
 
         financial = pd.read_excel(
             excel_file,
@@ -927,8 +1081,8 @@ class ChartPlotter:
             "순이익",
         }
 
-        missing = (
-            required - set(financial.columns)
+        missing = required - set(
+            financial.columns
         )
 
         if missing:
@@ -956,8 +1110,10 @@ class ChartPlotter:
 
         valid_quarters = (
             financial["분기"]
-            .str.fullmatch(r"\d{4}\.[1-4]Q")
-            .fillna(False)
+            .str.fullmatch(
+                r"\d{4}\.[1-4]Q",
+                na=False,
+            )
         )
 
         if not valid_quarters.all():
@@ -970,31 +1126,38 @@ class ChartPlotter:
                 "재무 엑셀에 중복된 분기가 있습니다."
             )
 
-        for column in (
+        value_columns = (
             "매출액",
             "영업이익",
             "순이익",
-        ):
+        )
+
+        for column in value_columns:
             original = financial[column]
-            converted = to_numeric(original)
+
+            converted = to_numeric(
+                original
+            )
 
             supplied = (
                 original.notna()
                 & original.astype("string")
                 .str.strip()
                 .ne("")
+                .fillna(False)
             )
 
             if (
                 supplied & converted.isna()
             ).any():
                 raise ValueError(
-                    f"'{column}'에는 숫자 또는 빈칸만 입력하세요."
+                    f"'{column}'에는 "
+                    "숫자 또는 빈칸만 입력하세요."
                 )
 
             financial[column] = converted
 
-        # YYYY.NQ → YYYYQn 형식으로 변환
+        # YYYY.NQ → YYYYQn
         period_labels = (
             financial["분기"]
             .str.replace(
@@ -1004,91 +1167,138 @@ class ChartPlotter:
             )
         )
 
-        periods = pd.PeriodIndex(
-            period_labels.to_numpy(),
+        financial["_period"] = (
+            pd.PeriodIndex(
+                period_labels.to_numpy(),
+                freq="Q-DEC",
+            )
+        )
+
+        # -------------------------------------------------
+        # 2. 가격 날짜 및 최근 6개 분기
+        # -------------------------------------------------
+
+        price_dates = pd.DatetimeIndex(
+            pd.to_datetime(
+                df["날짜"],
+                errors="coerce",
+            )
+        )
+
+        if price_dates.tz is not None:
+            price_dates = (
+                price_dates
+                .tz_convert("Asia/Seoul")
+                .tz_localize(None)
+            )
+
+        price_dates = (
+            price_dates.normalize()
+        )
+
+        if (
+            price_dates.isna().any()
+            or not price_dates.is_monotonic_increasing
+            or price_dates.has_duplicates
+        ):
+            raise ValueError(
+                "차트 날짜는 결측·중복 없이 "
+                "오름차순이어야 합니다."
+            )
+
+        reference_date = (
+            price_dates[-1]
+        )
+
+        cutoff = (
+            reference_date
+            - pd.DateOffset(
+                months=DISPLAY_MONTHS
+            )
+        )
+
+        current_period = (
+            reference_date.to_period(
+                "Q-DEC"
+            )
+        )
+
+        allowed_periods = pd.period_range(
+            end=current_period,
+            periods=FINANCIAL_QUARTERS,
             freq="Q-DEC",
+        )
+
+        # 엑셀에 누락 분기가 있더라도 그 자리를 유지합니다.
+        # 누락 분기를 과거 분기로 대신 채우지 않습니다.
+        financial = (
+            financial
+            .set_index("_period")
+            .reindex(allowed_periods)
+            .rename_axis("_period")
+            .reset_index()
+        )
+
+        periods = pd.PeriodIndex(
+            financial["_period"],
+            freq="Q-DEC",
+        )
+
+        financial["분기"] = [
+            f"{period.year}.{period.quarter}Q"
+            for period in periods
+        ]
+
+        financial["_quarter_start"] = (
+            periods.start_time.normalize()
         )
 
         financial["_quarter_end"] = (
             periods.end_time.normalize()
         )
 
-        price_dates = pd.DatetimeIndex(
-            pd.to_datetime(df["날짜"])
-        )
-
-        reference_date = (
-            price_dates.max().normalize()
-        )
-
-        cutoff = (
-            reference_date
-            - pd.DateOffset(months=DISPLAY_MONTHS)
-        )
-
-        visible_start = max(
-            cutoff,
-            price_dates.min().normalize(),
-        )
-
-        # 기간 내의 '완료된 분기'를 먼저 정합니다.
-        # 엑셀의 특정 분기가 누락되어도 과거 분기를
-        # 대신 끌어와서 채우지 않습니다.
-        current_period = (
-            reference_date.to_period("Q-DEC")
-        )
-
-        if (
-            current_period.end_time.normalize()
-            <= reference_date
-        ):
-            last_completed = current_period
-        else:
-            last_completed = current_period - 1
-
-        allowed_periods = pd.period_range(
-            end=last_completed,
-            periods=FINANCIAL_QUARTERS,
-            freq="Q-DEC",
-        )
-
-        allowed_ends = (
-            allowed_periods.end_time.normalize()
+        # 기준일이 속한 분기가 아직 끝나지 않았으면 예상
+        financial["_estimated"] = (
+            financial["_quarter_end"]
+            > reference_date
         )
 
         financial = financial.loc[
-            financial["_quarter_end"].isin(allowed_ends)
-            & financial["_quarter_end"].ge(visible_start)
-            & financial["_quarter_end"].le(reference_date)
+            financial["_quarter_start"].ge(
+                cutoff
+            )
+            & financial["_quarter_start"].le(
+                reference_date
+            )
         ].copy()
 
         financial = (
             financial
-            .sort_values("_quarter_end")
+            .sort_values("_quarter_start")
             .reset_index(drop=True)
         )
 
         if financial.empty:
             panel_message(
                 ax,
-                "표시 기간 안에 종료된 분기의 재무 데이터가 없습니다.\n"
-                "진행 중인 분기와 미래 분기는 표시하지 않습니다.",
+                "표시 기간에 해당하는 분기가 없습니다.",
             )
             return
 
-        # 모든 패널은 거래일 순번을 공통 X축으로 사용합니다.
-        # 각 분기 종료일을 해당 날짜 이전 마지막 거래일에 배치합니다.
-        positions = (
-            price_dates.searchsorted(
-                pd.DatetimeIndex(
-                    financial["_quarter_end"]
-                ),
-                side="right",
-            )
-            - 1
+        # -------------------------------------------------
+        # 3. 분기 시작일을 공통 거래일 X축에 배치
+        # -------------------------------------------------
+
+        positions = price_dates.searchsorted(
+            pd.DatetimeIndex(
+                financial["_quarter_start"]
+            ),
+            side="left",
         )
 
-        valid_positions = positions >= 0
+        valid_positions = (
+            positions < len(price_dates)
+        )
 
         financial = (
             financial.loc[valid_positions]
@@ -1102,64 +1312,105 @@ class ChartPlotter:
         if financial.empty:
             panel_message(
                 ax,
-                "가격 데이터 기간과 겹치는 분기 재무가 없습니다.",
+                "가격 데이터와 겹치는 분기가 없습니다.",
             )
             return
 
-        # 거래일이 없는 분기에 값을 잘못 배치하지 않도록 확인
         mapped_dates = price_dates.take(
             positions
         )
 
         mapped_periods = (
-            mapped_dates.to_period("Q-DEC")
+            mapped_dates.to_period(
+                "Q-DEC"
+            )
         )
 
-        quarter_end_periods = (
-            pd.DatetimeIndex(
-                financial["_quarter_end"]
+        financial_periods = (
+            pd.PeriodIndex(
+                financial["_period"],
+                freq="Q-DEC",
             )
-            .to_period("Q-DEC")
         )
 
         same_quarter = np.asarray(
-            mapped_periods == quarter_end_periods
+            mapped_periods
+            == financial_periods
+        )
+
+        # 분기 시작월 데이터가 없을 때
+        # 다른 월로 밀어 표시하지 않습니다.
+        same_start_month = np.asarray(
+            mapped_dates.month
+            == pd.DatetimeIndex(
+                financial["_quarter_start"]
+            ).month
+        )
+
+        valid_mapping = (
+            same_quarter
+            & same_start_month
         )
 
         financial = (
-            financial.loc[same_quarter]
+            financial.loc[valid_mapping]
             .reset_index(drop=True)
         )
 
-        positions = positions[
-            same_quarter
-        ].astype(float)
+        positions = (
+            positions[valid_mapping]
+            .astype(float)
+        )
 
         if financial.empty:
             panel_message(
                 ax,
-                "해당 분기에 대응하는 가격 데이터가 없습니다.",
+                "분기 시작월에 대응하는 "
+                "가격 데이터가 없습니다.",
             )
             return
 
         revenue = financial[
             "매출액"
-        ].to_numpy(dtype=float)
+        ].to_numpy(
+            dtype=float
+        )
 
         operating = financial[
             "영업이익"
-        ].to_numpy(dtype=float)
+        ].to_numpy(
+            dtype=float
+        )
 
         net_income = financial[
             "순이익"
-        ].to_numpy(dtype=float)
+        ].to_numpy(
+            dtype=float
+        )
+
+        estimated = financial[
+            "_estimated"
+        ].to_numpy(
+            dtype=bool
+        )
+
+        quarter_ordinals = np.array(
+            [
+                period.ordinal
+                for period
+                in financial["_period"]
+            ],
+            dtype=np.int64,
+        )
+
+        all_values = np.concatenate([
+            revenue,
+            operating,
+            net_income,
+        ])
 
         if not np.isfinite(
-            np.concatenate([
-                revenue,
-                operating,
-                net_income,
-            ])
+            all_values
         ).any():
             panel_message(
                 ax,
@@ -1167,17 +1418,22 @@ class ChartPlotter:
             )
             return
 
-        # 분기 사이 거래일 간격을 기준으로 막대 폭 설정
+        # -------------------------------------------------
+        # 4. 매출액: 실제/예상 막대 구분
+        # -------------------------------------------------
+
         if len(positions) >= 2:
-            gaps = np.diff(
+            positive_gaps = np.diff(
                 positions
             )
 
-            positive_gaps = gaps[
-                gaps > 0
-            ]
+            positive_gaps = (
+                positive_gaps[
+                    positive_gaps > 0
+                ]
+            )
 
-            if len(positive_gaps):
+            if positive_gaps.size:
                 bar_width = min(
                     24.0,
                     max(
@@ -1187,8 +1443,10 @@ class ChartPlotter:
                         ) * 0.38,
                     ),
                 )
+
             else:
                 bar_width = 12.0
+
         else:
             bar_width = min(
                 18.0,
@@ -1198,26 +1456,57 @@ class ChartPlotter:
                 ),
             )
 
-        valid_revenue = np.isfinite(
-            revenue
+        revenue_specs = (
+            (
+                False,
+                "매출액",
+                "#b8b8b8",
+                "#737373",
+                None,
+            ),
+            (
+                True,
+                "매출액(예상)",
+                "#eeeeee",
+                "#737373",
+                "///",
+            ),
         )
 
-        if valid_revenue.any():
+        for (
+            is_estimated,
+            label,
+            facecolor,
+            edgecolor,
+            hatch,
+        ) in revenue_specs:
+            mask = (
+                np.isfinite(revenue)
+                & (
+                    estimated
+                    == is_estimated
+                )
+            )
+
+            if not mask.any():
+                continue
+
             bars = ax.bar(
-                positions[valid_revenue],
-                revenue[valid_revenue],
+                positions[mask],
+                revenue[mask],
                 width=bar_width,
-                color="#b8b8b8",
-                edgecolor="#737373",
-                linewidth=0.7,
-                alpha=0.85,
-                label="매출액",
+                color=facecolor,
+                edgecolor=edgecolor,
+                linewidth=0.9,
+                hatch=hatch,
+                alpha=0.9,
+                label=label,
                 zorder=2,
             )
 
             for bar, value in zip(
                 bars,
-                revenue[valid_revenue],
+                revenue[mask],
             ):
                 ax.annotate(
                     f"{value:,.0f}",
@@ -1228,7 +1517,7 @@ class ChartPlotter:
                     ),
                     xytext=(
                         0,
-                        3 if value >= 0 else -3,
+                        4 if value >= 0 else -4,
                     ),
                     textcoords="offset points",
                     ha="center",
@@ -1241,6 +1530,10 @@ class ChartPlotter:
                     color="#525252",
                 )
 
+        # -------------------------------------------------
+        # 5. 영업이익·순이익: 실선/점선 구분
+        # -------------------------------------------------
+
         right_ax = ax.twinx()
 
         right_ax.set_ylabel(
@@ -1252,7 +1545,9 @@ class ChartPlotter:
         )
 
         right_ax.yaxis.set_major_formatter(
-            FuncFormatter(number_formatter)
+            FuncFormatter(
+                number_formatter
+            )
         )
 
         right_ax.tick_params(
@@ -1260,7 +1555,7 @@ class ChartPlotter:
             labelsize=8,
         )
 
-        for values, label, color, marker in (
+        line_specs = (
             (
                 operating,
                 "영업이익",
@@ -1273,21 +1568,137 @@ class ChartPlotter:
                 "#16a34a",
                 "s",
             ),
-        ):
-            if not np.isfinite(values).any():
-                continue
+        )
 
-            right_ax.plot(
-                positions,
-                values,
-                color=color,
-                marker=marker,
-                markersize=4.5,
-                linewidth=1.8,
-                label=label,
-                zorder=4,
+        line_legend_handles = []
+
+        for (
+            values,
+            label,
+            color,
+            marker,
+        ) in line_specs:
+            finite = np.isfinite(
+                values
             )
 
+            if not finite.any():
+                continue
+
+            # 인접한 분기 사이만 연결합니다.
+            for index in range(
+                1,
+                len(positions),
+            ):
+                consecutive = (
+                    quarter_ordinals[index]
+                    - quarter_ordinals[index - 1]
+                    == 1
+                )
+
+                if not (
+                    consecutive
+                    and finite[index - 1]
+                    and finite[index]
+                ):
+                    continue
+
+                forecast_segment = (
+                    estimated[index - 1]
+                    or estimated[index]
+                )
+
+                right_ax.plot(
+                    positions[
+                        index - 1:index + 1
+                    ],
+                    values[
+                        index - 1:index + 1
+                    ],
+                    color=color,
+                    linestyle=(
+                        "--"
+                        if forecast_segment
+                        else "-"
+                    ),
+                    linewidth=1.8,
+                    alpha=(
+                        0.85
+                        if forecast_segment
+                        else 1.0
+                    ),
+                    zorder=4,
+                )
+
+            # 종료 분기: 채운 마커
+            actual_mask = (
+                finite & ~estimated
+            )
+
+            if actual_mask.any():
+                right_ax.plot(
+                    positions[actual_mask],
+                    values[actual_mask],
+                    linestyle="None",
+                    marker=marker,
+                    markersize=5,
+                    markerfacecolor=color,
+                    markeredgecolor=color,
+                    color=color,
+                    zorder=5,
+                )
+
+                line_legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color=color,
+                        linestyle="-",
+                        linewidth=1.8,
+                        marker=marker,
+                        markersize=5,
+                        markerfacecolor=color,
+                        markeredgecolor=color,
+                        label=label,
+                    )
+                )
+
+            # 진행 중 분기: 빈 마커
+            forecast_mask = (
+                finite & estimated
+            )
+
+            if forecast_mask.any():
+                right_ax.plot(
+                    positions[forecast_mask],
+                    values[forecast_mask],
+                    linestyle="None",
+                    marker=marker,
+                    markersize=6,
+                    markerfacecolor="white",
+                    markeredgecolor=color,
+                    markeredgewidth=1.5,
+                    color=color,
+                    zorder=6,
+                )
+
+                line_legend_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        color=color,
+                        linestyle="--",
+                        linewidth=1.8,
+                        marker=marker,
+                        markersize=6,
+                        markerfacecolor="white",
+                        markeredgecolor=color,
+                        markeredgewidth=1.5,
+                        label=f"{label}(예상)",
+                    )
+                )
+
+            # 값 표시
             for x_value, value in zip(
                 positions,
                 values,
@@ -1296,15 +1707,21 @@ class ChartPlotter:
                     continue
 
                 offset = (
-                    6
+                    7
                     if label == "영업이익"
-                    else -10
+                    else -11
                 )
 
                 right_ax.annotate(
                     f"{value:,.0f}",
-                    xy=(x_value, value),
-                    xytext=(0, offset),
+                    xy=(
+                        x_value,
+                        value,
+                    ),
+                    xytext=(
+                        0,
+                        offset,
+                    ),
                     textcoords="offset points",
                     ha="center",
                     va=(
@@ -1316,28 +1733,52 @@ class ChartPlotter:
                     color=color,
                 )
 
-        # 분기명은 패널 안쪽에 표시합니다.
-        # 공통 X축 날짜 눈금은 변경하지 않습니다.
-        for x_value, quarter in zip(
+        # -------------------------------------------------
+        # 6. 분기명 및 예상 표시
+        # -------------------------------------------------
+
+        for (
+            x_value,
+            quarter,
+            is_estimated,
+        ) in zip(
             positions,
             financial["분기"],
+            estimated,
         ):
+            quarter_label = (
+                f"{quarter}\n(예상)"
+                if is_estimated
+                else str(quarter)
+            )
+
             ax.text(
                 x_value,
                 0.02,
-                str(quarter),
-                transform=ax.get_xaxis_transform(),
+                quarter_label,
+                transform=(
+                    ax.get_xaxis_transform()
+                ),
                 ha="center",
                 va="bottom",
                 fontsize=7.5,
-                color="#525252",
+                fontweight=(
+                    "bold"
+                    if is_estimated
+                    else "normal"
+                ),
+                color=(
+                    "#b45309"
+                    if is_estimated
+                    else "#525252"
+                ),
                 bbox={
                     "facecolor": "white",
-                    "alpha": 0.85,
+                    "alpha": 0.9,
                     "edgecolor": "none",
                     "pad": 1,
                 },
-                zorder=6,
+                zorder=7,
             )
 
         ax.axhline(
@@ -1346,30 +1787,46 @@ class ChartPlotter:
             linewidth=0.6,
         )
 
-        ax.margins(y=0.35)
-        right_ax.margins(y=0.42)
+        ax.margins(y=0.38)
+        right_ax.margins(y=0.45)
 
-        handles_left, labels_left = (
+        # -------------------------------------------------
+        # 7. 범례 및 안내
+        # -------------------------------------------------
+
+        bar_handles, bar_labels = (
             ax.get_legend_handles_labels()
         )
 
-        handles_right, labels_right = (
-            right_ax.get_legend_handles_labels()
+        legend_handles = (
+            bar_handles
+            + line_legend_handles
         )
 
-        ax.legend(
-            handles_left + handles_right,
-            labels_left + labels_right,
-            loc="upper left",
-            ncol=3,
-            fontsize=7.5,
-            framealpha=0.9,
+        legend_labels = (
+            bar_labels
+            + [
+                handle.get_label()
+                for handle
+                in line_legend_handles
+            ]
         )
+
+        if legend_handles:
+            ax.legend(
+                legend_handles,
+                legend_labels,
+                loc="upper left",
+                ncol=3,
+                fontsize=7.2,
+                framealpha=0.92,
+            )
 
         ax.text(
             0.99,
             0.98,
-            "진행 중·미래 분기 제외 / 분기 종료일 위치에 표시",
+            "진행 분기: 빗금·점선·빈 마커"
+            " / 미래 분기 제외",
             transform=ax.transAxes,
             ha="right",
             va="top",
@@ -1377,7 +1834,7 @@ class ChartPlotter:
             color="#6b7280",
             bbox={
                 "facecolor": "white",
-                "alpha": 0.85,
+                "alpha": 0.9,
                 "edgecolor": "none",
                 "pad": 1,
             },
@@ -1405,7 +1862,9 @@ class ChartPlotter:
         ChartPlotter.setup_korean_font()
 
         full_frame = (
-            ChartPlotter.prepare_chart_frame(df)
+            ChartPlotter.prepare_chart_frame(
+                df
+            )
         )
 
         cumulative_start = (
@@ -1461,7 +1920,6 @@ class ChartPlotter:
                 sharex=ax1,
             )
 
-            # 재무 패널도 같은 날짜 축 사용
             ax5 = fig.add_subplot(
                 grid[4],
                 sharex=ax1,
@@ -1502,7 +1960,7 @@ class ChartPlotter:
                 )
 
             except Exception as error:
-                # 재무 패널에서 생성한 보조축만 제거
+                # 재무 패널에서 생성한 보조축만 제거합니다.
                 for extra_ax in list(fig.axes):
                     if (
                         extra_ax
@@ -1524,6 +1982,10 @@ class ChartPlotter:
                     + str(error),
                 )
 
+            # ---------------------------------------------
+            # 모든 패널의 공통 날짜 눈금
+            # ---------------------------------------------
+
             tick_count = min(
                 10,
                 len(plot_df),
@@ -1540,9 +2002,15 @@ class ChartPlotter:
 
             tick_labels = [
                 pd.Timestamp(
-                    plot_df.loc[position, "날짜"]
-                ).strftime("%Y-%m-%d")
-                for position in tick_positions
+                    plot_df.loc[
+                        position,
+                        "날짜",
+                    ]
+                ).strftime(
+                    "%Y-%m-%d"
+                )
+                for position
+                in tick_positions
             ]
 
             ax5.set_xticks(
@@ -1562,8 +2030,8 @@ class ChartPlotter:
                 labelpad=3,
             )
 
-            # 오른쪽 끝 분기 막대가 잘리지 않도록
-            # 거래일 몇 칸 정도의 공통 여백을 둡니다.
+            # 분기 막대가 가장자리에서 잘리지 않도록
+            # 모든 패널에 같은 X축 여백을 적용합니다.
             edge_padding = min(
                 15.0,
                 max(
@@ -1595,6 +2063,10 @@ class ChartPlotter:
                 bottom=0.065,
             )
 
+            # ---------------------------------------------
+            # 선택적 파일 저장
+            # ---------------------------------------------
+
             if save_chart:
                 output_dir = Path(
                     img_dir
@@ -1607,7 +2079,9 @@ class ChartPlotter:
 
                 save_date = pd.Timestamp.now(
                     tz="Asia/Seoul"
-                ).strftime("%Y%m%d")
+                ).strftime(
+                    "%Y%m%d"
+                )
 
                 safe_name = "".join(
                     "_"
@@ -1616,7 +2090,8 @@ class ChartPlotter:
                         or ord(char) < 32
                     )
                     else char
-                    for char in str(stock_name)
+                    for char
+                    in str(stock_name)
                 ).strip(" .")
 
                 if not safe_name:
