@@ -2391,10 +2391,13 @@ def save_watch_group(path, watch_stocks):
     )
 
 
-def render_group_reorder(group_name, items):
+def render_group_reorder(group_name, items, key_prefix=""):
     """
     그룹 종목의 순서를 ↑ / ↓ 버튼으로 바꾸고
     즉시 stocks.txt에 저장합니다.
+
+    key_prefix: 같은 그룹을 화면에 여러 번 그릴 때
+    위젯 키가 겹치지 않도록 호출 위치별로 다르게 지정합니다.
     """
     if not items:
         st.info(f"[{group_name}] 그룹이 비어 있습니다.")
@@ -2405,6 +2408,8 @@ def render_group_reorder(group_name, items):
         "_",
         group_name,
     )
+
+    key_prefix = f"{key_prefix}_" if key_prefix else ""
 
     for order_index, item in enumerate(items):
         name, ticker = item
@@ -2427,7 +2432,7 @@ def render_group_reorder(group_name, items):
         with middle:
             if st.button(
                 "⬆️",
-                key=f"reorder_{safe_group}_up_{order_index}",
+                key=f"{key_prefix}reorder_{safe_group}_up_{order_index}",
                 disabled=(order_index == 0),
                 use_container_width=True,
             ):
@@ -2448,7 +2453,7 @@ def render_group_reorder(group_name, items):
         with right:
             if st.button(
                 "⬇️",
-                key=f"reorder_{safe_group}_down_{order_index}",
+                key=f"{key_prefix}reorder_{safe_group}_down_{order_index}",
                 disabled=(order_index == len(items) - 1),
                 use_container_width=True,
             ):
@@ -2569,6 +2574,7 @@ with st.sidebar:
         render_group_reorder(
             "관심",
             watch_stocks,
+            key_prefix="watch_editor",
         )
 
         if st.button("관심 그룹 저장"):
@@ -2602,6 +2608,7 @@ with st.sidebar:
         render_group_reorder(
             reorder_group,
             stock_groups.get(reorder_group, []),
+            key_prefix="other_groups",
         )
 
     with st.form("batch_analysis_form"):
