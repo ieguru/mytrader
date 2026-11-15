@@ -433,41 +433,125 @@ class SignalGenerator:
         return buy, sell
 
     @staticmethod
+    def enforce_signal_pairing(buy, sell):
+        """
+        매수·매도 신호가 번갈아 짝을 이루도록 정리합니다.
+
+        - 직전 신호와 같은 종류의 신호는 무시합니다.
+          (동일한 매수·매도 신호가 계속 발생하는 것을 제거)
+        - 매수 뒤에는 매도, 매도 뒤에는 매수만 올 수 있습니다.
+        - 첫 신호는 매수·매도 어느 쪽이든 허용합니다.
+          (첫 신호가 매도여도 백테스트는 포지션이 없어 무시합니다.)
+        - 같은 날 매수와 매도가 겹치면 방향을 판단할 수 없으므로
+          두 신호 모두 제거합니다.
+        """
+        paired_buy = buy.copy()
+        paired_sell = sell.copy()
+
+        #  0: 신호 없음,  1: 직전 신호가 매수,  -1: 직전 신호가 매도
+        last_signal = 0
+
+        for timestamp in buy.index:
+            day_buy = bool(buy.loc[timestamp])
+            day_sell = bool(sell.loc[timestamp])
+
+            if day_buy and day_sell:
+                paired_buy.loc[timestamp] = False
+                paired_sell.loc[timestamp] = False
+                continue
+
+            if day_buy:
+                if last_signal == 1:
+                    # 동일한 매수 신호는 무시합니다.
+                    paired_buy.loc[timestamp] = False
+                else:
+                    last_signal = 1
+            elif day_sell:
+                if last_signal == -1:
+                    # 동일한 매도 신호는 무시합니다.
+                    paired_sell.loc[timestamp] = False
+                else:
+                    last_signal = -1
+
+        return paired_buy, paired_sell
+
+    @staticmethod
+    def expand_turn_window(turn):
+        """
+        월간 전환 조건을 전환일부터 그 달의 마지막 날까지
+        앞쪽 방향으로만 확장합니다.
+
+        다음 달이 되면 창을 초기화하며, 전환이 없던 달은
+        조건 구간이 아닙니다.
+        """
+        window = pd.Series(False, index=turn.index)
+
+        active_month = None
+        active = False
+
+        for timestamp in turn.index:
+            month = timestamp.to_period("M")
+
+            if month != active_month:
+                active_month = month
+                active = False
+
+            if turn.loc[timestamp]:
+                active = True
+
+            window.loc[timestamp] = active
+
+        return window
+
+    @staticmethod
     def identify_weekly_monthly_signals(df):
         """
         주간 추세와 월간 추세 전환을 결합합니다.
 
         매수:
-        - 주간 추세가 +1
-        - 월간 추세가 0 이하에서 +1로 전환
+        - 월간 추세가 감소(-1)하다가 증가(+1)로 전환한 달에서
+        - 주간 추세가 전주보다 증가(+1)할 때
 
         매도:
-        - 주간 추세가 -1
-        - 월간 추세가 0 이상에서 -1로 전환
+        - 월간 추세가 증가(+1)하다가 감소(-1)로 전환한 달에서
+        - 주간 추세가 전주보다 감소(-1)할 때
+
+        월간 전환은 전환일부터 그 달의 마지막 날까지 조건 구간으로
+        유지하므로, 같은 구간 안에서 주간 추세가 증가 조건을
+        여러 번 충족해도 첫 신호만 인정합니다
+        (동일 신호 반복 무시).
+
+        또한 매수와 매도가 번갈아 짝을 이루도록 정리합니다.
         """
         previous_monthly = df["Monthly_Trend"].shift(1)
 
-        monthly_turn_up = (
-            (previous_monthly <= 0)
+        turn_up = (
+            (previous_monthly == -1)
             & (df["Monthly_Trend"] == 1)
         )
 
-        monthly_turn_down = (
-            (previous_monthly >= 0)
+        turn_down = (
+            (previous_monthly == 1)
             & (df["Monthly_Trend"] == -1)
         )
 
+        buy_window = SignalGenerator.expand_turn_window(turn_up)
+        sell_window = SignalGenerator.expand_turn_window(turn_down)
+
         buy = (
-            (df["Weekly_Trend"] == 1)
-            & monthly_turn_up
+            buy_window
+            & (df["Weekly_Trend"] == 1)
         )
 
         sell = (
-            (df["Weekly_Trend"] == -1)
-            & monthly_turn_down
+            sell_window
+            & (df["Weekly_Trend"] == -1)
         )
 
-        return buy, sell
+        return SignalGenerator.enforce_signal_pairing(
+            buy,
+            sell,
+        )
 
     @staticmethod
     def add_signals(df):
