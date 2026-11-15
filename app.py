@@ -2431,7 +2431,7 @@ def render_group_reorder(group_name, items, key_prefix=""):
 
         with middle:
             if st.button(
-                "⬆️",
+                "위",
                 key=f"{key_prefix}reorder_{safe_group}_up_{order_index}",
                 disabled=(order_index == 0),
                 use_container_width=True,
@@ -2452,7 +2452,7 @@ def render_group_reorder(group_name, items, key_prefix=""):
 
         with right:
             if st.button(
-                "⬇️",
+                "아래",
                 key=f"{key_prefix}reorder_{safe_group}_down_{order_index}",
                 disabled=(order_index == len(items) - 1),
                 use_container_width=True,
