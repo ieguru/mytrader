@@ -57,6 +57,135 @@ from data_collector import fetch_data
 
 
 # =========================================================
+# 전역 UI 스타일
+# =========================================================
+
+st.markdown(
+    """
+    <style>
+    @font-face { font-family:'Pretendard'; src:local('Pretendard'); }
+
+    html, body, .stApp, [data-testid="stSidebar"] {
+        font-family:'Pretendard','Noto Sans KR',
+            'Apple SD Gothic Neo','Malgun Gothic',
+            -apple-system,'Segoe UI',sans-serif;
+        letter-spacing:-0.01em;
+    }
+
+    /* 메인 레이아웃 */
+    .block-container { padding-top:2.4rem; padding-bottom:3rem; max-width:1400px; }
+
+    /* 제목 */
+    .stApp h1 {
+        font-weight:800; letter-spacing:-0.03em;
+        padding-bottom:.55rem; margin-bottom:1.1rem;
+        border-bottom:1px solid #e6ebf2;
+    }
+
+    /* 섹션 헤더 — 그라디언트 액센트 바 */
+    .stApp h2 {
+        position:relative; padding-left:15px;
+        font-weight:800; letter-spacing:-0.02em;
+        scroll-margin-top:70px;
+    }
+    .stApp h2::before {
+        content:''; position:absolute; left:0; top:8%;
+        height:84%; width:5px; border-radius:4px;
+        background:linear-gradient(180deg,#2563eb,#7c3aed);
+    }
+    .stApp h3 { font-weight:700; letter-spacing:-0.01em; margin-top:.6rem; }
+
+    /* 사이드바 */
+    section[data-testid="stSidebar"] {
+        background:#f8fafc;
+        border-right:1px solid #e6ebf2;
+    }
+    section[data-testid="stSidebar"] .stApp h2 { padding-left:0; }
+    section[data-testid="stSidebar"] h2::before { display:none; }
+
+    /* 버튼 */
+    .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
+        border-radius:10px; font-weight:600; width:100%;
+        border:1px solid #dfe6ef; background:#ffffff; color:#334155;
+        transition:all .16s ease;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        border-color:#2563eb; color:#2563eb;
+        box-shadow:0 3px 10px rgba(37,99,235,.13);
+        transform:translateY(-1px);
+    }
+    button[kind="primary"] {
+        background:linear-gradient(135deg,#2563eb,#4f46e5);
+        color:#ffffff; border:none;
+        box-shadow:0 2px 8px rgba(37,99,235,.28);
+    }
+    button[kind="primary"]:hover {
+        color:#ffffff; filter:brightness(1.07);
+        box-shadow:0 5px 16px rgba(37,99,235,.38);
+        transform:translateY(-1px);
+    }
+
+    /* 지표 카드 */
+    [data-testid="stMetric"] {
+        background:#ffffff; border:1px solid #e8ecf3;
+        border-radius:14px; padding:16px 20px;
+        box-shadow:0 1px 3px rgba(15,23,42,.06);
+    }
+    [data-testid="stMetricLabel"] {
+        color:#64748b; font-weight:600; font-size:.9rem;
+    }
+    [data-testid="stMetricValue"] { font-weight:800; letter-spacing:-0.02em; }
+
+    /* 펼침 메뉴 */
+    [data-testid="stExpander"] {
+        border:1px solid #e6ebf2; border-radius:12px;
+        background:#ffffff; overflow:hidden;
+        box-shadow:0 1px 2px rgba(15,23,42,.04);
+    }
+    [data-testid="stExpander"] summary { font-weight:700; }
+
+    /* 데이터프레임·알림·탭 */
+    [data-testid="stDataFrame"] {
+        border-radius:12px; overflow:hidden;
+        border:1px solid #e8ecf3;
+    }
+    [data-testid="stAlert"] { border-radius:12px; }
+    hr { border-color:#eef2f7; margin:1.4rem 0; }
+
+    /* 되돌아가기 링크 */
+    .back-link {
+        display:inline-block; padding:5px 14px; margin-bottom:.7rem;
+        border:1px solid #e2e8f0; border-radius:999px;
+        background:#ffffff; color:#475569;
+        font-size:.85rem; font-weight:600; text-decoration:none;
+        transition:all .15s ease;
+    }
+    .back-link:hover { border-color:#2563eb; color:#2563eb; text-decoration:none; }
+
+    /* 신호 카드 */
+    .signal-card {
+        background:linear-gradient(180deg,#fbfcfe,#f6f8fb);
+        border:1px solid #e8ecf3; border-radius:14px;
+        padding:16px 18px;
+        display:flex; align-items:center; justify-content:center;
+        min-height:88px;
+    }
+    .signal-card-label {
+        font-size:.85rem; font-weight:700; color:#475569;
+        margin-bottom:6px; letter-spacing:0;
+    }
+
+    /* 개요 테이블 (동적 스타일 보강) */
+    .stock-overview-table tbody tr {
+        transition:background .12s ease;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# =========================================================
 # 기본 설정
 # =========================================================
 
@@ -796,7 +925,11 @@ def render_signal_card(
     signal_date,
     reference_date,
 ):
-    st.caption(title)
+    st.markdown(
+        f'<div class="signal-card-label">'
+        f'{escape(title)}</div>',
+        unsafe_allow_html=True,
+    )
 
     content = signal_html(
         signal,
@@ -806,8 +939,7 @@ def render_signal_card(
     )
 
     st.markdown(
-        '<div style="min-height:76px;'
-        'display:flex;align-items:center;">'
+        '<div class="signal-card">'
         + content
         + '</div>',
         unsafe_allow_html=True,
@@ -904,24 +1036,29 @@ def render_results_overview(results):
     html = (
         '<style>'
         '.stock-overview-table {'
-        'width:100%;border-collapse:collapse;'
+        'width:100%;border-collapse:separate;border-spacing:0;'
         'font-size:16px;'
+        'background:#ffffff;'
+        'border:1px solid #e8ecf3;border-radius:14px;overflow:hidden;'
+        'box-shadow:0 1px 3px rgba(15,23,42,.06);'
         '}'
         '.stock-overview-table th {'
-        'padding:14px 16px;text-align:left;'
-        'white-space:nowrap;'
-        'border-bottom:2px solid '
-        'rgba(128,128,128,0.35);'
-        'background:rgba(128,128,128,0.08);'
+        'padding:14px 18px;text-align:left;'
+        'white-space:nowrap;font-weight:700;color:#475569;'
+        'font-size:14px;letter-spacing:0;'
+        'border-bottom:2px solid #e8ecf3;'
+        'background:#f8fafc;'
         '}'
         '.stock-overview-table td {'
-        'padding:14px 16px;'
+        'padding:14px 18px;'
         'vertical-align:middle;'
-        'border-bottom:1px solid '
-        'rgba(128,128,128,0.22);'
+        'border-bottom:1px solid #eef2f7;'
+        '}'
+        '.stock-overview-table tbody tr:last-child td {'
+        'border-bottom:none;'
         '}'
         '.stock-overview-table tbody tr:hover {'
-        'background:rgba(128,128,128,0.08);'
+        'background:#f6f9ff;'
         '}'
         '</style>'
         '<div style="overflow-x:auto;">'
@@ -1314,8 +1451,10 @@ def render_stock_result(result, position):
     )
 
     st.markdown(
-        "[↑ 전체 결과 요약으로 돌아가기]"
-        "(#results-overview)"
+        '<a class="back-link" '
+        'href="#results-overview" '
+        'target="_self">↑ 전체 결과 요약으로 돌아가기</a>',
+        unsafe_allow_html=True,
     )
 
     # -----------------------------------------------------
@@ -2335,6 +2474,85 @@ with st.sidebar:
                 f"{item[0]} ({item[1]})"
             ),
         )
+
+        # -------------------------------------------------
+        # 순서 변경: ↑ / ↓ 버튼으로 즉시 저장합니다.
+        # -------------------------------------------------
+
+        st.markdown("**순서 변경**")
+
+        if watch_stocks:
+            for order_index, item in enumerate(
+                watch_stocks
+            ):
+                name, ticker = item
+
+                left, middle, right = st.columns(
+                    [5, 1, 1]
+                )
+
+                with left:
+                    st.markdown(
+                        f'<div style="padding:6px 0;'
+                        'font-weight:600;">'
+                        f'{escape(str(order_index + 1))}. '
+                        f'{escape(name)} '
+                        '<span style="color:#808080;'
+                        'font-size:13px;font-weight:400;">'
+                        f'({escape(ticker)})'
+                        '</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                with middle:
+                    if st.button(
+                        "↑",
+                        key=f"watch_up_{order_index}",
+                        disabled=(order_index == 0),
+                        use_container_width=True,
+                    ):
+                        reordered = list(watch_stocks)
+                        reordered[
+                            order_index - 1
+                        ], reordered[order_index] = (
+                            reordered[order_index],
+                            reordered[order_index - 1],
+                        )
+
+                        save_watch_group(
+                            STOCKS_FILE,
+                            reordered,
+                        )
+
+                        st.rerun()
+
+                with right:
+                    if st.button(
+                        "↓",
+                        key=f"watch_down_{order_index}",
+                        disabled=(
+                            order_index
+                            == len(watch_stocks) - 1
+                        ),
+                        use_container_width=True,
+                    ):
+                        reordered = list(watch_stocks)
+                        reordered[
+                            order_index + 1
+                        ], reordered[order_index] = (
+                            reordered[order_index],
+                            reordered[order_index + 1],
+                        )
+
+                        save_watch_group(
+                            STOCKS_FILE,
+                            reordered,
+                        )
+
+                        st.rerun()
+
+        else:
+            st.info("관심 그룹이 비어 있습니다.")
 
         if st.button("관심 그룹 저장"):
             updated_watch = [
