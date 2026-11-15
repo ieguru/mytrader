@@ -828,13 +828,6 @@ def render_results_overview(results):
         anchor="results-overview",
     )
 
-    st.caption(
-        "종목명이나 신호를 클릭하면 상세분석으로 이동합니다. "
-        f"신호는 각 종목의 마지막 가격 데이터 기준 "
-        f"최근 {RECENT_SIGNAL_DAYS}일(달력일)의 "
-        "마지막 신호입니다."
-    )
-
     rows = []
 
     for position, result in enumerate(
@@ -1359,14 +1352,6 @@ def render_stock_result(result, position):
             ),
         )
 
-        per_description = latest.get(
-            "PER 설명",
-            "",
-        )
-
-        if per_description:
-            st.caption(per_description)
-
     # -----------------------------------------------------
     # 두 번째 줄: 최근 7일 매매 신호
     # -----------------------------------------------------
@@ -1414,13 +1399,6 @@ def render_stock_result(result, position):
 
     st.markdown("### 최근 매매 신호")
 
-    st.caption(
-        "전체 분석 기간 중 전략별 최근 "
-        f"{RECENT_SIGNAL_LIMIT}건입니다. "
-        f"상단의 최근 {RECENT_SIGNAL_DAYS}일 "
-        "요약과는 조회 범위가 다릅니다."
-    )
-
     st.markdown("**주간 단독 신호**")
 
     weekly_signals = result["weekly_signals"].head(
@@ -1465,15 +1443,6 @@ def render_stock_result(result, position):
 
     st.markdown("### 종합차트")
 
-    st.caption(
-        "차트 구성: 최근 18개월 · 날짜 축 동기화 / "
-        "패널 1: 주가·목표가·매매 신호 / "
-        "패널 2: 거래량 / "
-        "패널 3: 일간·주간·월간 MACD / "
-        "패널 4: 외국인·기관·개인 누적 순매수 수량 / "
-        "패널 5: 종료된 최근 6개 분기의 재무"
-    )
-
     png_bytes = result.get("png_bytes")
 
     if png_bytes:
@@ -1485,11 +1454,6 @@ def render_stock_result(result, position):
         image_filename = result.get(
             "image_filename"
         )
-
-        if image_filename:
-            st.caption(
-                f"저장 위치: img/{image_filename}"
-            )
 
         st.download_button(
             f"{name} 고해상도 차트 다운로드",
@@ -1527,15 +1491,6 @@ def render_stock_result(result, position):
             hide_index=True,
             use_container_width=True,
         )
-
-    st.caption(
-        "기존 백테스트 계산 방식입니다. "
-        "총수익률은 거래별 수익률의 단순 합계이며 "
-        "수수료·세금·슬리피지 및 미청산 평가손익은 "
-        "제외됩니다. 손익비도 기존 계산식입니다. "
-        "주·월간 신호 계산 방식에 따라 과거 신호가 "
-        "변경되거나 미래 정보가 참조될 수 있습니다."
-    )
 
     # -----------------------------------------------------
     # 거래 기록: 전략별 기본 접힘
@@ -2236,6 +2191,58 @@ except Exception as error:
 # 왼쪽: 설정
 # =========================================================
 
+def save_watch_group(path, watch_stocks):
+    """
+    stocks.txt의 [관심] 섹션만 교체하고
+    나머지 그룹과 주석은 그대로 유지합니다.
+
+    항목 형식: (종목명, 종목코드) 튜플 목록
+    """
+    lines = path.read_text(
+        encoding="utf-8-sig"
+    ).splitlines()
+
+    new_lines = []
+    in_watch = False
+    watch_written = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_watch and not watch_written:
+                for name, ticker in watch_stocks:
+                    new_lines.append(f"{name},{ticker}")
+                watch_written = True
+
+            in_watch = stripped == "[관심]"
+            new_lines.append(line)
+            continue
+
+        if in_watch:
+            continue
+
+        new_lines.append(line)
+
+    if in_watch and not watch_written:
+        for name, ticker in watch_stocks:
+            new_lines.append(f"{name},{ticker}")
+
+    if not watch_written:
+        new_lines.extend(
+            ["", "[관심]"]
+            + [
+                f"{name},{ticker}"
+                for name, ticker in watch_stocks
+            ]
+        )
+
+    path.write_text(
+        "\n".join(new_lines) + "\n",
+        encoding="utf-8",
+    )
+
+
 with st.sidebar:
     st.header("등록 종목")
 
@@ -2244,14 +2251,7 @@ with st.sidebar:
         and os.environ.get("KRX_PW")
     )
 
-    if credentials_present:
-        st.caption(
-            "KRX 인증정보가 설정되어 있습니다. "
-            "로그인 성공 여부는 실제 조회 시 "
-            "확인됩니다."
-        )
-
-    else:
+    if not credentials_present:
         st.warning(
             "KRX 인증정보가 설정되지 않았습니다. "
             "인증이 필요한 데이터 조회가 "
@@ -2277,12 +2277,6 @@ with st.sidebar:
                     stock_item
                 )
 
-    st.caption(
-        f"전체 {len(stock_groups)}개 그룹 · "
-        "선택 그룹 내 "
-        f"{len(available_stocks)}개 종목"
-    )
-
     if available_stocks:
         st.dataframe(
             pd.DataFrame(
@@ -2300,6 +2294,65 @@ with st.sidebar:
         st.info(
             "그룹을 하나 이상 선택하세요."
         )
+
+    # -----------------------------------------------------
+    # 관심 그룹 편집: 다른 그룹 종목 추가 / 기존 종목 삭제
+    # -----------------------------------------------------
+
+    with st.expander("관심 그룹 편집"):
+        watch_stocks = stock_groups.get("관심", [])
+
+        other_stocks = []
+        other_seen = set()
+
+        for group_name, items in stock_groups.items():
+            if group_name == "관심":
+                continue
+
+            for item in items:
+                if item in other_seen:
+                    continue
+
+                if item in watch_stocks:
+                    continue
+
+                other_seen.add(item)
+                other_stocks.append(item)
+
+        add_choices = st.multiselect(
+            "추가할 종목",
+            options=other_stocks,
+            format_func=lambda item: (
+                f"{item[0]} ({item[1]})"
+            ),
+        )
+
+
+        remove_choices = st.multiselect(
+            "삭제할 종목",
+            options=watch_stocks,
+            format_func=lambda item: (
+                f"{item[0]} ({item[1]})"
+            ),
+        )
+
+        if st.button("관심 그룹 저장"):
+            updated_watch = [
+                item
+                for item in watch_stocks
+                if item not in remove_choices
+            ] + [
+                item
+                for item in add_choices
+                if item not in watch_stocks
+            ]
+
+            save_watch_group(
+                STOCKS_FILE,
+                updated_watch,
+            )
+
+            st.rerun()
 
     with st.form("batch_analysis_form"):
         selected_stocks = st.multiselect(
@@ -2335,65 +2388,6 @@ with st.sidebar:
             "분석 실행",
             use_container_width=True,
         )
-
-    st.caption(
-        "재무 파일: file/종목명.xlsx\n\n"
-        "파일이 없는 종목은 건너뜁니다. "
-        "엑셀 시트명은 종목명과 같아야 합니다."
-    )
-
-    st.caption(
-        "차트용 엑셀 컬럼:\n"
-        "분기, 목표가, 매출액, 영업이익, 순이익\n\n"
-        "PER용 추가 컬럼:\n"
-        "상장주식수, 4Q_income"
-    )
-
-    st.caption(
-        "PER = 최근 종가 × 상장주식수 "
-        "÷ (4Q_income × 1억)\n\n"
-        "상장주식수는 주 단위, "
-        "4Q_income은 억원 단위로 입력하세요."
-    )
-
-    st.caption(
-        "PER은 가격 기준일까지 종료된 분기 중 "
-        "가장 최근 분기의 엑셀 값을 사용합니다. "
-        "해당 분기의 값이 누락되거나 "
-        "4Q_income이 0 이하이면 —로 표시합니다.\n\n"
-        "공시일·실적/추정 구분은 별도로 "
-        "판정하지 않습니다."
-    )
-
-    st.caption(
-        "종료일은 어제까지 선택할 수 있으며 "
-        "별도 장중 시세는 합성하지 않습니다."
-    )
-
-    st.caption(
-        "상단 신호: 마지막 가격 데이터 기준 "
-        f"최근 {RECENT_SIGNAL_DAYS}일"
-        "(주말·공휴일 포함)의 마지막 신호\n\n"
-        "빨간 ↑: 매수 / "
-        "파란 ↓: 매도 / "
-        "회색 ×: 신호 없음"
-    )
-
-    st.caption(
-        "최근 매매 신호 표는 전체 분석 기간 중 "
-        f"전략별 최근 {RECENT_SIGNAL_LIMIT}건입니다."
-    )
-
-    st.caption(
-        "차트 구성:\n\n"
-        "1. 주가·목표가·매매 신호\n"
-        "2. 거래량\n"
-        "3. 일간·주간·월간 MACD\n"
-        "4. 외국인·기관·개인 누적 순매수 수량\n"
-        "5. 분기 재무\n\n"
-        "최근 18개월 표시 및 재무 날짜 동기화는 "
-        "최신 charts.py에서 처리합니다."
-    )
 
     st.divider()
 
@@ -2435,11 +2429,6 @@ with st.sidebar:
         st.session_state[
             "last_analysis_checked"
         ] = True
-
-    st.caption(
-        "화면 결과를 초기화해도 img 폴더의 PNG와 "
-        "저장 결과 파일은 삭제하지 않습니다."
-    )
 
 
 # =========================================================
@@ -2514,28 +2503,6 @@ if not batch_started:
         )
 
 with summary_container:
-    if saved_at:
-        try:
-            saved_time = datetime.fromisoformat(
-                saved_at
-            ).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-
-        except (TypeError, ValueError):
-            saved_time = str(saved_at)
-
-        st.caption(
-            f"마지막 분석 저장: {saved_time} "
-            "(한국 시간)"
-        )
-
-    if period:
-        st.caption(
-            f"분석 요청 기간: {period[0]} ~ {period[1]} · "
-            f"표시 가능한 결과: {len(results)}개"
-        )
-
     if records:
         st.markdown(
             "### 종목별 실행 내역"
