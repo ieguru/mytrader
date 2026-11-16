@@ -282,7 +282,6 @@ OUTPUT_DIR = BASE_DIR / "output"
 LAST_RESULT_FILE = OUTPUT_DIR / "last_analysis.json"
 
 TODAY_KST = datetime.now(ZoneInfo("Asia/Seoul")).date()
-YESTERDAY_KST = TODAY_KST - timedelta(days=1)
 
 # 기준일 포함 최근 7일: 거래일이 아닌 달력일입니다.
 RECENT_SIGNAL_DAYS = 7
@@ -2719,13 +2718,13 @@ with st.sidebar:
                 pd.Timestamp(TODAY_KST)
                 - pd.DateOffset(years=3)
             ).date(),
-            max_value=YESTERDAY_KST,
+            max_value=TODAY_KST,
         )
 
         end = st.date_input(
             "종료일",
-            value=YESTERDAY_KST,
-            max_value=YESTERDAY_KST,
+            value=TODAY_KST,
+            max_value=TODAY_KST,
         )
 
         include_investors = st.checkbox(
