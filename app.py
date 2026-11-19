@@ -226,16 +226,25 @@ st.markdown(
         color:var(--muted); font-weight:600; font-size:.87rem;
         margin-bottom:10px;
     }
-    .trend-lights { display:flex; gap:18px; align-items:flex-start; }
-    .trend-light { display:flex; flex-direction:column; align-items:center; gap:5px; }
-    .trend-dot {
-        width:15px; height:15px; border-radius:50%; display:inline-block;
-        box-shadow:0 0 0 3px rgba(15,23,42,.05);
+    .trend-lights { display:flex; gap:16px; align-items:flex-start; }
+    .trend-light {
+        display:flex; flex-direction:column; align-items:center; gap:4px;
+        min-width:44px;
     }
-    .trend-dot.up   { background:#dc2626; }   /* 상승: 빨간 원 */
-    .trend-dot.down { background:#2563eb; }   /* 하락: 파란 원 */
-    .trend-dot.flat { background:#cbd5e1; }   /* 보합·계산 불가 */
+    .trend-dot {
+        width:18px; height:18px; border-radius:50%; display:inline-block;
+        border:2px solid rgba(255,255,255,.9);
+        box-shadow:0 0 0 2px var(--line);
+    }
+    .trend-dot.up   { background:#dc2626; box-shadow:0 0 0 2px #fecaca; }  /* 상승: 빨간 원 */
+    .trend-dot.down { background:#2563eb; box-shadow:0 0 0 2px #bfdbfe; }  /* 하락: 파란 원 */
+    .trend-dot.flat { background:#e2e8f0; }                                /* 보합 */
+    .trend-dot.none { background:#fff; border:2px dashed #cbd5e1; }        /* 값 없음 */
     .trend-name { font-size:.7rem; color:var(--faint); font-weight:600; }
+    .trend-state { font-size:.66rem; font-weight:700; letter-spacing:-.01em; }
+    .trend-state.up { color:#dc2626; }
+    .trend-state.down { color:#2563eb; }
+    .trend-state.flat, .trend-state.none { color:var(--faint); }
 
     /* ---------- 펼침 메뉴 ---------- */
     [data-testid="stExpander"] {
@@ -1424,12 +1433,24 @@ TREND_LIGHTS = (
 )
 
 
-def trend_dot_class(value):
-    """+1 상승(빨강) / -1 하락(파랑) / 그 외 회색."""
+TREND_STATE_LABEL = {
+    "up": "상승",
+    "down": "하락",
+    "flat": "보합",
+    "none": "—",
+}
+
+
+def trend_state(value):
+    """
+    추세 값을 화면 상태로 바꿉니다.
+
+    up(상승·빨강) / down(하락·파랑) / flat(보합) / none(값 없음)
+    """
     number = to_finite_number(value)
 
     if number is None:
-        return "flat"
+        return "none"
 
     if number > 0:
         return "up"
@@ -1442,15 +1463,20 @@ def trend_dot_class(value):
 
 def render_trend_lights(latest):
     """일간·주간·월간 추세를 신호등(원) 3개로 표시합니다."""
-    dots = []
+    lights = []
+    missing = False
 
     for name, key in TREND_LIGHTS:
-        css = trend_dot_class(latest.get(key))
+        if key not in latest:
+            missing = True
 
-        dots.append(
+        css = trend_state(latest.get(key))
+
+        lights.append(
             '<div class="trend-light">'
             f'<span class="trend-dot {css}"></span>'
             f'<span class="trend-name">{name}</span>'
+            f'<span class="trend-state {css}">{TREND_STATE_LABEL[css]}</span>'
             "</div>"
         )
 
@@ -1458,10 +1484,16 @@ def render_trend_lights(latest):
         '<div class="trend-card">'
         '<div class="trend-label">일간/주간/월간 추세</div>'
         '<div class="trend-lights">'
-        + "".join(dots)
+        + "".join(lights)
         + "</div></div>",
         unsafe_allow_html=True,
     )
+
+    if missing:
+        st.caption(
+            "추세 값이 없는 저장본입니다. "
+            "‘분석 실행’ 또는 다음 자동 실행 후 표시됩니다."
+        )
 
 
 def render_stock_result(result, position):
