@@ -57,6 +57,7 @@ from data_collector import fetch_data
 
 import per_status
 import result_store
+import stock_groups as stock_data
 import schedule_config
 
 
@@ -172,6 +173,29 @@ st.markdown(
         color:#ffffff !important; border:none;
         box-shadow:0 3px 10px rgba(79,70,229,.32);
         letter-spacing:-0.01em;
+    }
+
+    /* ---------- 분석 실행 버튼: 파스텔 강조 ---------- */
+    .stFormSubmitButton > button,
+    [data-testid="stFormSubmitButton"] button {
+        background:linear-gradient(135deg,#e0e7ff 0%,#fae8ff 52%,#dbeafe 100%) !important;
+        color:#3730a3 !important; border:1px solid #c7d2fe !important;
+        border-radius:14px !important; font-weight:800 !important;
+        font-size:1.02rem !important; letter-spacing:-.01em;
+        padding:.92rem 1rem !important;
+        box-shadow:0 6px 18px rgba(99,102,241,.20) !important;
+        transition:transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .stFormSubmitButton > button:hover,
+    [data-testid="stFormSubmitButton"] button:hover {
+        filter:brightness(1.02);
+        border-color:#a5b4fc !important;
+        box-shadow:0 10px 26px rgba(99,102,241,.30) !important;
+        transform:translateY(-1px);
+    }
+    .stFormSubmitButton > button:active,
+    [data-testid="stFormSubmitButton"] button:active {
+        transform:translateY(0);
     }
     button[kind="primary"]:hover {
         color:#ffffff !important; filter:brightness(1.08);
@@ -389,127 +413,6 @@ if st.session_state.get("result_schema") != RESULT_SCHEMA:
 # 등록 종목 읽기
 # =========================================================
 
-def load_stock_groups(path):
-    """
-    stocks.txt 형식:
-
-    [반도체]
-    삼성전자,005930
-    SK하이닉스,000660
-
-    [자동차]
-    현대차,005380
-    """
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"등록 종목 파일을 찾을 수 없습니다: {path.name}"
-        )
-
-    groups = {}
-    registered_codes = {}
-    current_group = None
-
-    text = path.read_text(encoding="utf-8-sig")
-
-    for line_number, raw_line in enumerate(
-        text.splitlines(),
-        start=1,
-    ):
-        line = raw_line.strip()
-
-        if not line or line.startswith("#"):
-            continue
-
-        if line.startswith("[") and line.endswith("]"):
-            current_group = line[1:-1].strip()
-
-            if not current_group:
-                raise ValueError(
-                    f"stocks.txt {line_number}행: "
-                    "그룹명이 비어 있습니다."
-                )
-
-            groups.setdefault(current_group, [])
-            continue
-
-        if current_group is None:
-            raise ValueError(
-                f"stocks.txt {line_number}행: "
-                "종목 위에 [그룹명]을 먼저 작성하세요."
-            )
-
-        fields = [
-            value.strip()
-            for value in line.split(",")
-        ]
-
-        if len(fields) != 2:
-            raise ValueError(
-                f"stocks.txt {line_number}행: "
-                "'종목명,종목코드' 형식이어야 합니다."
-            )
-
-        stock_name, ticker = fields
-        invalid_chars = '<>:"/\\|?*'
-
-        if (
-            not stock_name
-            or stock_name in {".", ".."}
-            or any(
-                char in stock_name
-                for char in invalid_chars
-            )
-            or any(
-                ord(char) < 32
-                for char in stock_name
-            )
-            or stock_name.endswith((".", " "))
-        ):
-            raise ValueError(
-                f"stocks.txt {line_number}행: "
-                "파일명으로 사용할 수 없는 종목명입니다."
-            )
-
-        if not (
-            ticker.isascii()
-            and ticker.isdigit()
-            and len(ticker) == 6
-        ):
-            raise ValueError(
-                f"stocks.txt {line_number}행: "
-                "종목코드는 숫자 6자리여야 합니다."
-            )
-
-        previous_code = registered_codes.get(stock_name)
-
-        if (
-            previous_code is not None
-            and previous_code != ticker
-        ):
-            raise ValueError(
-                f"stocks.txt {line_number}행: "
-                f"'{stock_name}'에 서로 다른 "
-                "종목코드가 등록되었습니다."
-            )
-
-        registered_codes[stock_name] = ticker
-        stock_item = (stock_name, ticker)
-
-        if stock_item not in groups[current_group]:
-            groups[current_group].append(stock_item)
-
-    groups = {
-        group_name: stocks
-        for group_name, stocks in groups.items()
-        if stocks
-    }
-
-    if not groups:
-        raise ValueError(
-            "stocks.txt에 등록된 종목이 없습니다."
-        )
-
-    return groups
 
 
 # =========================================================
@@ -2316,7 +2219,7 @@ if not st.session_state.get(
 # =========================================================
 
 try:
-    stock_groups = load_stock_groups(
+    stock_groups = stock_data.load_stock_groups(
         STOCKS_FILE
     )
 
@@ -2336,146 +2239,10 @@ except Exception as error:
 # 왼쪽: 설정
 # =========================================================
 
-def save_group_section(path, group_name, items):
-    """
-    stocks.txt의 [그룹명] 섹션만 교체하고
-    나머지 그룹과 주석은 그대로 유지합니다.
-
-    항목 형식: (종목명, 종목코드) 튜플 목록
-    """
-    lines = path.read_text(
-        encoding="utf-8-sig"
-    ).splitlines()
-
-    section_header = f"[{group_name}]"
-
-    new_lines = []
-    in_section = False
-    section_written = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.startswith("[") and stripped.endswith("]"):
-            if in_section and not section_written:
-                for name, ticker in items:
-                    new_lines.append(f"{name},{ticker}")
-                section_written = True
-
-            in_section = stripped == section_header
-            new_lines.append(line)
-            continue
-
-        if in_section:
-            continue
-
-        new_lines.append(line)
-
-    if in_section and not section_written:
-        for name, ticker in items:
-            new_lines.append(f"{name},{ticker}")
-        section_written = True
-
-    if not section_written:
-        new_lines.extend(
-            ["", section_header]
-            + [f"{name},{ticker}" for name, ticker in items]
-        )
-
-    path.write_text(
-        "\n".join(new_lines) + "\n",
-        encoding="utf-8",
-    )
 
 
-def save_watch_group(path, watch_stocks):
-    """[관심] 섹션 교체 — save_group_section의 래퍼입니다."""
-    save_group_section(
-        path,
-        "관심",
-        watch_stocks,
-    )
 
 
-def render_group_reorder(group_name, items, key_prefix=""):
-    """
-    그룹 종목의 순서를 ↑ / ↓ 버튼으로 바꾸고
-    즉시 stocks.txt에 저장합니다.
-
-    key_prefix: 같은 그룹을 화면에 여러 번 그릴 때
-    위젯 키가 겹치지 않도록 호출 위치별로 다르게 지정합니다.
-    """
-    if not items:
-        st.info(f"[{group_name}] 그룹이 비어 있습니다.")
-        return
-
-    safe_group = re.sub(
-        r"\W+",
-        "_",
-        group_name,
-    )
-
-    key_prefix = f"{key_prefix}_" if key_prefix else ""
-
-    for order_index, item in enumerate(items):
-        name, ticker = item
-
-        left, middle, right = st.columns([5, 1, 1])
-
-        with left:
-            st.markdown(
-                f'<div style="padding:6px 0;'
-                'font-weight:600;">'
-                f'{escape(str(order_index + 1))}. '
-                f'{escape(name)} '
-                '<span style="color:#808080;'
-                'font-size:13px;font-weight:400;">'
-                f'({escape(ticker)})'
-                '</span></div>',
-                unsafe_allow_html=True,
-            )
-
-        with middle:
-            if st.button(
-                "위",
-                key=f"{key_prefix}reorder_{safe_group}_up_{order_index}",
-                disabled=(order_index == 0),
-                use_container_width=True,
-            ):
-                reordered = list(items)
-                reordered[order_index - 1], reordered[order_index] = (
-                    reordered[order_index],
-                    reordered[order_index - 1],
-                )
-
-                save_group_section(
-                    STOCKS_FILE,
-                    group_name,
-                    reordered,
-                )
-
-                st.rerun()
-
-        with right:
-            if st.button(
-                "아래",
-                key=f"{key_prefix}reorder_{safe_group}_down_{order_index}",
-                disabled=(order_index == len(items) - 1),
-                use_container_width=True,
-            ):
-                reordered = list(items)
-                reordered[order_index + 1], reordered[order_index] = (
-                    reordered[order_index],
-                    reordered[order_index + 1],
-                )
-
-                save_group_section(
-                    STOCKS_FILE,
-                    group_name,
-                    reordered,
-                )
-
-                st.rerun()
 
 
 with st.sidebar:
@@ -2531,99 +2298,14 @@ with st.sidebar:
         )
 
     # -----------------------------------------------------
-    # 관심 그룹 편집: 다른 그룹 종목 추가 / 기존 종목 삭제
+    # 그룹 편집·순서 변경은 전용 페이지에서 수행합니다.
     # -----------------------------------------------------
 
-    with st.expander("관심 그룹 편집"):
-        watch_stocks = stock_groups.get("관심", [])
-
-        other_stocks = []
-        other_seen = set()
-
-        for group_name, items in stock_groups.items():
-            if group_name == "관심":
-                continue
-
-            for item in items:
-                if item in other_seen:
-                    continue
-
-                if item in watch_stocks:
-                    continue
-
-                other_seen.add(item)
-                other_stocks.append(item)
-
-        add_choices = st.multiselect(
-            "추가할 종목",
-            options=other_stocks,
-            format_func=lambda item: (
-                f"{item[0]} ({item[1]})"
-            ),
-        )
-
-
-        remove_choices = st.multiselect(
-            "삭제할 종목",
-            options=watch_stocks,
-            format_func=lambda item: (
-                f"{item[0]} ({item[1]})"
-            ),
-        )
-
-        # -------------------------------------------------
-        # 순서 변경: ↑ / ↓ 버튼으로 즉시 저장합니다.
-        # -------------------------------------------------
-
-        st.markdown("**순서 변경**")
-
-        render_group_reorder(
-            "관심",
-            watch_stocks,
-            key_prefix="watch_editor",
-        )
-
-        if st.button("관심 그룹 저장"):
-            updated_watch = [
-                item
-                for item in watch_stocks
-                if item not in remove_choices
-            ] + [
-                item
-                for item in add_choices
-                if item not in watch_stocks
-            ]
-
-            save_watch_group(
-                STOCKS_FILE,
-                updated_watch,
-            )
-
-            # stocks.txt에 저장되므로 다시 접속해도
-            # 마지막 저장 상태가 유지됩니다.
-            st.toast(
-                "관심 그룹을 stocks.txt에 저장했습니다. "
-                "다음 접속부터 저장된 구성이 유지됩니다.",
-                icon="💾",
-            )
-
-            st.rerun()
-
-    # -----------------------------------------------------
-    # 다른 그룹 순서 변경: 보유·매매 후보 등 모든 그룹 지원
-    # -----------------------------------------------------
-
-    with st.expander("다른 그룹 순서 변경"):
-        reorder_group = st.selectbox(
-            "그룹 선택",
-            options=list(stock_groups),
-        )
-
-        render_group_reorder(
-            reorder_group,
-            stock_groups.get(reorder_group, []),
-            key_prefix="other_groups",
-        )
+    st.page_link(
+        "pages/1_groups.py",
+        label="관심 그룹 편집 · 그룹 순서 변경",
+        icon="🗂",
+    )
 
     with st.form("batch_analysis_form"):
         selected_stocks = st.multiselect(
