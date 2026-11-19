@@ -203,9 +203,14 @@ st.markdown(
         font-weight:800; letter-spacing:-0.025em; color:var(--ink);
     }
 
-    /* ---------- 최근 종가 · PER 값 크기(기본의 절반) ---------- */
+    /* ---------- 최근 종가 · PER · 추세: 같은 행, 같은 높이 ---------- */
+    .st-key-price_per_row {
+        --metric-h: 96px;
+    }
     .st-key-price_per_row [data-testid="stMetric"] {
-        padding:16px 20px 13px;
+        min-height:var(--metric-h);
+        padding:16px 20px;
+        display:flex; flex-direction:column; justify-content:center;
     }
     .st-key-price_per_row [data-testid="stMetricValue"] {
         font-size:.88rem; font-weight:700; letter-spacing:-0.01em;
@@ -215,16 +220,14 @@ st.markdown(
     .trend-card {
         position:relative; background:var(--surface);
         border:1px solid var(--line); border-radius:var(--radius-lg);
-        padding:16px 20px 13px; box-shadow:var(--shadow-xs);
-        overflow:hidden; height:100%;
+        padding:16px 20px; box-shadow:var(--shadow-xs);
+        overflow:hidden;
+        min-height:var(--metric-h, 96px);
+        display:flex; align-items:center; justify-content:center;
     }
     .trend-card::before {
         content:''; position:absolute; left:0; top:0; bottom:0; width:4px;
         background:linear-gradient(180deg,var(--accent),#8b5cf6);
-    }
-    .trend-card .trend-label {
-        color:var(--muted); font-weight:600; font-size:.87rem;
-        margin-bottom:10px;
     }
     .trend-lights { display:flex; gap:16px; align-items:flex-start; }
     .trend-light {
@@ -241,10 +244,7 @@ st.markdown(
     .trend-dot.flat { background:#e2e8f0; }                                /* 보합 */
     .trend-dot.none { background:#fff; border:2px dashed #cbd5e1; }        /* 값 없음 */
     .trend-name { font-size:.7rem; color:var(--faint); font-weight:600; }
-    .trend-state { font-size:.66rem; font-weight:700; letter-spacing:-.01em; }
-    .trend-state.up { color:#dc2626; }
-    .trend-state.down { color:#2563eb; }
-    .trend-state.flat, .trend-state.none { color:var(--faint); }
+
 
     /* ---------- 펼침 메뉴 ---------- */
     [data-testid="stExpander"] {
@@ -1437,7 +1437,7 @@ TREND_STATE_LABEL = {
     "up": "상승",
     "down": "하락",
     "flat": "보합",
-    "none": "—",
+    "none": "값 없음",
 }
 
 
@@ -1462,7 +1462,12 @@ def trend_state(value):
 
 
 def render_trend_lights(latest):
-    """일간·주간·월간 추세를 신호등(원) 3개로 표시합니다."""
+    """
+    일간·주간·월간 추세를 신호등(원) 3개만 표시합니다.
+
+    - 상승: 빨간 원 / 하락: 파란 원 / 보합: 회색 원 / 값 없음: 점선 원
+    - 카드 라벨과 상태 문구는 넣지 않습니다(높이를 다른 항목과 맞추기 위해).
+    """
     lights = []
     missing = False
 
@@ -1474,15 +1479,14 @@ def render_trend_lights(latest):
 
         lights.append(
             '<div class="trend-light">'
-            f'<span class="trend-dot {css}"></span>'
+            f'<span class="trend-dot {css}" '
+            f'title="{name}간 추세: {TREND_STATE_LABEL[css]}"></span>'
             f'<span class="trend-name">{name}</span>'
-            f'<span class="trend-state {css}">{TREND_STATE_LABEL[css]}</span>'
             "</div>"
         )
 
     st.markdown(
         '<div class="trend-card">'
-        '<div class="trend-label">일간/주간/월간 추세</div>'
         '<div class="trend-lights">'
         + "".join(lights)
         + "</div></div>",
