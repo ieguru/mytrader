@@ -1,4 +1,4 @@
-# batch_daily.py
+﻿# batch_daily.py
 """
 매일 정해진 시각에 모든 종목을 분석하는 배치입니다.
 (예: GitHub Actions cron 20:01 KST — .github/workflows/daily_analysis.yml)
@@ -378,6 +378,7 @@ def main(notify=True):
                             timespec="seconds"
                         ),
                         complete=False,
+                        source="batch",
                         meta={
                             "recent_signal_days": RECENT_SIGNAL_DAYS,
                             "recent_signal_limit": RECENT_SIGNAL_LIMIT,
@@ -405,6 +406,7 @@ def main(notify=True):
             period=(start.isoformat(), today.isoformat()),
             saved_at=saved_at,
             complete=True,
+            source="batch",
             meta={
                 "recent_signal_days": RECENT_SIGNAL_DAYS,
                 "recent_signal_limit": RECENT_SIGNAL_LIMIT,
@@ -449,10 +451,13 @@ def send_notification(records, today):
 
     config = notifier.config_from_env(os.environ)
 
+    if config.channel:
+        logger.info("알림 대상: 채널 %s", config.channel)
+
     if not config.configured:
         logger.warning(
             "텔레그램 설정이 없어 알림을 건너뜁니다"
-            "(TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)."
+            "(TELEGRAM_BOT_TOKEN + TELEGRAM_CHANNEL 또는 TELEGRAM_CHAT_ID)."
         )
         return
 
@@ -471,7 +476,8 @@ def send_notification(records, today):
         logger.error("텔레그램 알림 실패: %s", outcome["error"])
     elif outcome["sent"]:
         logger.info(
-            "텔레그램 알림 전송: 메시지 %s개 / 차트 %s장",
+            "텔레그램 알림 전송: %s / 메시지 %s개 / 차트 %s장",
+            outcome.get("target") or config.describe_target(),
             outcome["messages"],
             outcome["photos"],
         )
@@ -501,6 +507,39 @@ def run_notify_test():
     if not config.token:
         logger.error("TELEGRAM_BOT_TOKEN 을 설정하세요.")
         return 1
+
+    # 채널이 지정되면 게시 권한까지 검증합니다.
+    if config.channel:
+        notifier_instance = notifier.TelegramNotifier(config)
+
+        try:
+            info = notifier_instance.verify_target()
+
+        except Exception as error:
+            logger.error("채널 검증 실패: %s", error)
+            return 1
+
+        print("채널 확인:")
+        print(f"  이름   {info['title']}")
+        print(f"  주소   @{info['username']}" if info["username"] else
+              f"  주소   {info['chat_id']}")
+        print(f"  유형   {info['type']}")
+        print(f"  봇     @{info['bot_username']} / 상태 {info['status']}")
+
+        for warning in info["warnings"]:
+            print(f"  주의   {warning}")
+
+        try:
+            notifier_instance.send_message(
+                "✅ <b>채널 연결 확인</b>\n"
+                f"<b>{info['title']}</b> 채널로 매일 분석 결과를 보냅니다."
+            )
+        except Exception as error:
+            logger.error("전송 실패: %s", error)
+            return 1
+
+        logger.info("테스트 메시지를 채널에 게시했습니다: %s", info["title"])
+        return 0
 
     # chat_id가 없으면 최근 메시지에서 찾아 안내합니다.
     if not config.chat_id:

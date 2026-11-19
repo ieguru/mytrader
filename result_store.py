@@ -235,6 +235,7 @@ def build_snapshot(
     saved_at=None,
     complete=False,
     meta=None,
+    source="app",
 ):
     """분석 결과 목록을 저장 가능한 스냅샷(dict)으로 만듭니다."""
     if not results:
@@ -266,6 +267,7 @@ def build_snapshot(
     return {
         "version": SNAPSHOT_VERSION,
         "saved_at": saved_at,
+        "source": str(source),          # "app" | "batch"
         "complete": bool(complete),
         "period": list(period) if period else None,
         "meta": dict(meta or {}),
@@ -391,6 +393,7 @@ def restore_snapshot(payload, image_dir=None):
         "records": payload.get("records") or [],
         "period": payload.get("period"),
         "saved_at": payload.get("saved_at"),
+        "source": payload.get("source") or "app",
         "complete": bool(payload.get("complete", True)),
         "notes": notes,
     }
@@ -556,8 +559,168 @@ class HttpStore:
         return "외부 HTTP 저장소"
 
 
+class GitHubStore:
+    """
+    GitHub 저장소에 커밋된 스냅샷을 읽습니다(읽기 전용).
+
+    왜 필요한가
+        Actions가 결과를 저장소에 커밋해도 Streamlit Cloud가
+        항상 즉시 재배포되는 것은 아닙니다(수동 재시작·브랜치 불일치 등).
+        그러면 앱은 옛 파일을 계속 보여 줍니다.
+        이 저장소를 쓰면 앱이 깨어날 때마다 저장소의 최신 스냅샷을
+        직접 가져오므로, 재배포를 기다리지 않고 결과를 볼 수 있습니다.
+
+    설정 예시 (.streamlit/secrets.toml)
+        [result_store]
+        backend = "github"
+        repo    = "owner/repo"
+        path    = "output/last_analysis.json.gz"
+        branch  = "main"
+        token   = "ghp_..."     # private 저장소면 필요
+    """
+
+    backend = "github"
+
+    def __init__(
+        self,
+        repo,
+        path="output/last_analysis.json.gz",
+        branch="main",
+        token=None,
+        api_base="https://api.github.com",
+        timeout=20,
+    ):
+        self.repo = str(repo).strip().strip("/")
+        self.path = str(path).lstrip("/")
+        self.branch = str(branch or "main")
+        self.token = token
+        self.api_base = api_base.rstrip("/")
+        self.timeout = timeout
+        self.last_size = 0
+
+    @property
+    def raw_url(self):
+        return f"{self.api_base}/repos/{self.repo}/contents/{self.path}"
+
+    def _session(self):
+        import requests  # 지연 import
+
+        session = requests.Session()
+        headers = {
+            "Accept": "application/vnd.github.raw",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        session.headers.update(headers)
+        return session
+
+    def fetch_bytes(self):
+        """스냅샷 원본 바이트를 가져옵니다(없으면 None)."""
+        session = self._session()
+
+        response = session.get(
+            self.raw_url,
+            params={"ref": self.branch},
+            timeout=self.timeout,
+        )
+
+        if response.status_code == 404:
+            return None
+
+        response.raise_for_status()
+
+        content = response.content
+        self.last_size = len(content)
+        return content
+
+    def load(self):
+        content = self.fetch_bytes()
+        return loads(content) if content else None
+
+    def download_bytes(self):
+        return self.fetch_bytes()
+
+    def save(self, payload):
+        # 배치는 git commit으로 올립니다. 앱에서는 로컬에 저장합니다.
+        raise SnapshotError(
+            "GitHub 저장소는 읽기 전용입니다(결과는 배치가 커밋합니다)."
+        )
+
+    def describe(self):
+        return f"GitHub {self.repo} · {self.branch}:{self.path}"
+
+
+class FallbackStore:
+    """
+    여러 저장소를 함께 사용합니다.
+
+    - 읽기: 둘 다 읽어 '더 최신(saved_at)' 스냅샷을 씁니다.
+    - 쓰기: 로컬에 저장합니다(원격은 읽기 전용).
+    """
+
+    backend = "fallback"
+
+    def __init__(self, stores, writer=None):
+        self.stores = [store for store in stores if store is not None]
+        self.writer = writer or self.stores[-1]
+        self.last_size = 0
+
+    @staticmethod
+    def _saved_at(payload):
+        return str((payload or {}).get("saved_at") or "")
+
+    def load(self):
+        newest = None
+
+        for store in self.stores:
+            try:
+                payload = store.load()
+
+            except Exception:
+                continue  # 한 저장소 장애가 복원을 막지 않게
+
+            if not payload:
+                continue
+
+            if newest is None or self._saved_at(payload) > self._saved_at(newest):
+                newest = payload
+
+        if newest is not None:
+            self.last_size = len(dumps(newest))
+
+        return newest
+
+    def save(self, payload):
+        return self.writer.save(payload)
+
+    def download_bytes(self):
+        for store in self.stores:
+            try:
+                data = store.download_bytes()
+
+            except Exception:
+                continue
+
+            if data:
+                return data
+
+        return None
+
+    def describe(self):
+        return " · ".join(store.describe() for store in self.stores)
+
+
 def make_store(base_dir, secrets=None, filename="last_analysis.json.gz"):
-    """설정에 맞는 저장소를 만듭니다(기본: 로컬)."""
+    """
+    설정에 맞는 저장소를 만듭니다.
+
+    backend = "local"   (기본) output/ 아래 파일
+    backend = "http"    외부 HTTP 저장소(읽기/쓰기)
+    backend = "github"  저장소에 커밋된 스냅샷 읽기 + 로컬 쓰기
+    """
     config = {}
 
     try:
@@ -569,6 +732,16 @@ def make_store(base_dir, secrets=None, filename="last_analysis.json.gz"):
         config = {}
 
     backend = str(config.get("backend", "local")).strip().lower()
+    local = LocalStore(Path(base_dir) / "output" / filename)
+
+    if backend in {"github", "repo", "git"} and config.get("repo"):
+        remote = GitHubStore(
+            repo=config["repo"],
+            path=config.get("path") or f"output/{filename}",
+            branch=config.get("branch") or "main",
+            token=config.get("token"),
+        )
+        return FallbackStore([remote, local], writer=local)
 
     if backend in {"http", "https", "s3", "supabase", "webdav"}:
         url = config.get("url")
@@ -576,4 +749,4 @@ def make_store(base_dir, secrets=None, filename="last_analysis.json.gz"):
         if url:
             return HttpStore(url, token=config.get("token"))
 
-    return LocalStore(Path(base_dir) / "output" / filename)
+    return local

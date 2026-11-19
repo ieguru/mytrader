@@ -57,6 +57,7 @@ from data_collector import fetch_data
 
 import per_status
 import result_store
+import schedule_config
 
 
 # =========================================================
@@ -1776,6 +1777,7 @@ def save_last_analysis(
                 "recent_signal_days": RECENT_SIGNAL_DAYS,
                 "recent_signal_limit": RECENT_SIGNAL_LIMIT,
             },
+            source="app",
         )
 
         RESULT_STORE.save(payload)
@@ -1798,6 +1800,7 @@ def apply_restored_result(restored):
     st.session_state["batch_records"] = restored["records"]
     st.session_state["batch_period"] = restored["period"]
     st.session_state["last_saved_at"] = restored["saved_at"]
+    st.session_state["result_source"] = restored.get("source", "app")
 
     notes = list(restored.get("notes") or [])
 
@@ -2759,12 +2762,145 @@ saved_at = st.session_state.get(
     "last_saved_at"
 )
 
-if saved_at:
-    st.caption(
-        f"마지막 저장 {saved_at} · "
-        f"{RESULT_STORE.describe()} · "
-        "재접속하면 이 결과가 자동으로 다시 표시됩니다."
-    )
+# =========================================================
+# 자동 실행 결과 상태 패널
+# =========================================================
+
+def read_schedule_summary():
+    """스케줄 설정 요약과 다음 실행 예정을 반환합니다."""
+    try:
+        schedule = schedule_config.load_config(
+            BASE_DIR / "config" / "schedule.json"
+        )
+
+    except Exception:
+        schedule = dict(schedule_config.DEFAULT_CONFIG)
+
+    upcoming = schedule_config.next_runs(schedule, count=2)
+
+    return schedule, upcoming
+
+
+def render_run_status(results, saved_at, source):
+    """
+    '자동 실행 결과를 보고 있다'를 한눈에 알 수 있게 요약합니다.
+
+    contributions
+        - 언제 만들어진 결과인지(자동/수동)
+        - 몇 종목·어느 기준일 데이터인지
+        - 다음 자동 실행 예정 시각
+        - 최신 결과를 다시 가져오는 버튼
+    """
+    if not saved_at and not results:
+        return
+
+    is_batch = str(source or "app") == "batch"
+
+    with st.container(border=True):
+        head_left, head_right = st.columns([3, 1])
+
+        with head_left:
+            badge = (
+                "🤖 자동 실행 결과"
+                if is_batch
+                else "🖥 앱에서 실행한 결과"
+            )
+            st.markdown(f"#### {badge}")
+
+            if is_batch:
+                st.caption(
+                    "예약된 배치가 생성한 결과입니다. "
+                    "접속만 하면 항상 최신 저장본을 불러옵니다."
+                )
+            else:
+                st.caption(
+                    "이 브라우저에서 '분석 실행'으로 만든 결과입니다."
+                )
+
+        with head_right:
+            if st.button(
+                "🔄 최신 결과 확인",
+                use_container_width=True,
+                key="refresh_last_result",
+            ):
+                if load_last_analysis():
+                    st.rerun()
+
+                else:
+                    st.toast(
+                        "새로 불러올 저장 결과가 없습니다.",
+                        icon="ℹ️",
+                    )
+
+        info_cols = st.columns(4)
+        done = [row for row in results if row.get("latest")]
+
+        basis_dates = sorted({
+            str(row["latest"].get("기준일"))
+            for row in done
+            if row["latest"].get("기준일")
+        })
+
+        signal_count = sum(
+            1 for row in done
+            if row["latest"].get("Weekly+Monthly 신호") in ("매수", "매도")
+        )
+
+        info_cols[0].metric("종목 수", f"{len(results)}개")
+        info_cols[1].metric("매수·매도 신호", f"{signal_count}개")
+        info_cols[2].metric(
+            "데이터 기준일",
+            basis_dates[-1] if basis_dates else "-",
+        )
+        info_cols[3].metric(
+            "저장 시각",
+            str(saved_at).replace("T", " ")[:16] if saved_at else "-",
+        )
+
+        schedule, upcoming = read_schedule_summary()
+
+        schedule_text = schedule_config.describe(schedule)
+
+        if not schedule.get("enabled"):
+            schedule_text += " · 일시 중지"
+
+        st.caption(
+            f"⏰ 다음 자동 실행: {schedule_text}"
+            + (
+                f" → {upcoming[0]:%m/%d %H:%M}"
+                if upcoming
+                else ""
+            )
+            + f" · 저장소: {RESULT_STORE.describe()}"
+        )
+
+        if is_batch and basis_dates:
+            today = datetime.now(
+                ZoneInfo("Asia/Seoul")
+            ).date()
+
+            try:
+                gap = (
+                    today - datetime.strptime(
+                        basis_dates[-1], "%Y-%m-%d"
+                    ).date()
+                ).days
+
+            except ValueError:
+                gap = 0
+
+            if gap >= 5:
+                st.warning(
+                    f"데이터 기준일이 {gap}일 전입니다. "
+                    "휴장이거나 배치·데이터 수집에 문제가 있을 수 있습니다."
+                )
+
+
+render_run_status(
+    results,
+    st.session_state.get("last_saved_at"),
+    st.session_state.get("result_source"),
+)
 
 # 저장 결과 복원 또는 화면 재실행 시 요약표 표시
 if not batch_started:
