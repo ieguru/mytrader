@@ -55,6 +55,8 @@ from analysis_engine import analyze_frame, recent_signals
 from charts import make_chart_png
 from data_collector import fetch_data
 
+import result_store
+
 
 # =========================================================
 # 전역 UI 스타일
@@ -279,7 +281,7 @@ STOCKS_FILE = BASE_DIR / "stocks.txt"
 FINANCIAL_DIR = BASE_DIR / "file"
 IMAGE_DIR = BASE_DIR / "img"
 OUTPUT_DIR = BASE_DIR / "output"
-LAST_RESULT_FILE = OUTPUT_DIR / "last_analysis.json"
+LAST_RESULT_FILE = OUTPUT_DIR / "last_analysis.json.gz"
 
 TODAY_KST = datetime.now(ZoneInfo("Asia/Seoul")).date()
 
@@ -289,13 +291,34 @@ RECENT_SIGNAL_DAYS = 7
 # 최근 매매 신호 표의 최대 행 수입니다.
 RECENT_SIGNAL_LIMIT = 3
 
-RESULT_SCHEMA = "png-v8-recent7-per-top3"
-SAVED_RESULT_VERSION = 8
+RESULT_SCHEMA = "png-v9-recent7-per-top3"
+SAVED_RESULT_VERSION = result_store.SNAPSHOT_VERSION
 
 # 데이터 수집 코드 변경 전 캐시와 구분합니다.
 DATA_CACHE_VERSION = "price-investor-only-v2"
 
 WEEKDAYS = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def read_result_store_secrets():
+    """
+    st.secrets의 [result_store] 설정을 읽습니다.
+
+    설정이 없으면 로컬(output/last_analysis.json.gz)을 씁니다.
+    Streamlit Cloud에서 재배포에도 결과를 남기려면
+    [result_store] backend/url/token을 등록하세요.
+    """
+    try:
+        return dict(st.secrets)
+
+    except Exception:
+        return {}
+
+
+RESULT_STORE = result_store.make_store(
+    BASE_DIR,
+    read_result_store_secrets(),
+)
 
 
 # =========================================================
@@ -1673,20 +1696,35 @@ def render_stock_result(result, position):
             use_container_width=True,
         )
 
-        image_filename = result.get(
-            "image_filename"
+        image_filename = (
+            result.get("image_download_name")
+            or result.get("image_filename")
+        )
+
+        is_preview = bool(
+            result.get("image_is_preview")
         )
 
         st.download_button(
-            f"{name} 고해상도 차트 다운로드",
+            (
+                f"{name} 차트 다운로드 (미리보기)"
+                if is_preview
+                else f"{name} 고해상도 차트 다운로드"
+            ),
             data=png_bytes,
             file_name=(
                 image_filename
                 or f"{name}_chart.png"
             ),
-            mime="image/png",
+            mime=result.get(
+                "image_mime",
+                "image/png",
+            ),
             key=f"chart_{position}_{ticker}",
         )
+
+        if result.get("image_note"):
+            st.caption(result["image_note"])
 
     else:
         st.warning(
@@ -1859,209 +1897,111 @@ def save_last_analysis(
     results,
     records,
     period,
+    complete=False,
 ):
+    """
+    마지막 실행 결과를 스냅샷으로 저장합니다.
+
+    종목이 하나 끝날 때마다 complete=False로 호출하므로,
+    브라우저를 닫거나 앱이 잠들어도 직전까지의 결과가 남습니다.
+    마지막 호출은 complete=True로 전체 완료를 표시합니다.
+
+    스냅샷 구성
+    - 표·수치: JSON(orient="split") — 인덱스까지 보존
+    - 차트: 원본 PNG는 img/ 폴더에 두고,
+            스냅샷에는 저용량 JPEG 미리보기만 담습니다.
+            (300dpi PNG를 base64로 넣으면 20종목에서 수십 MB가 되어
+             Cloud 메모리·응답시간을 잡아먹습니다)
+    """
     if not results:
-        return
-
-    OUTPUT_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    saved_results = []
-
-    for result in results:
-        png_bytes = result.get("png_bytes")
-
-        saved_results.append({
-            "stock_name": result["stock_name"],
-            "ticker": result["ticker"],
-            "latest": result["latest"],
-            "messages": result.get(
-                "messages",
-                [],
-            ),
-            "image_filename": result.get(
-                "image_filename"
-            ),
-            "png_base64": (
-                base64.b64encode(
-                    png_bytes
-                ).decode("ascii")
-                if png_bytes
-                else None
-            ),
-            "weekly_signals": dataframe_to_json_data(
-                result["weekly_signals"]
-            ),
-            "combined_signals": dataframe_to_json_data(
-                result["combined_signals"]
-            ),
-            "metrics": dataframe_to_json_data(
-                result["metrics"]
-            ),
-            "trades": {
-                strategy: dataframe_to_json_data(frame)
-                for strategy, frame
-                in result["trades"].items()
-            },
-        })
+        return False
 
     saved_at = datetime.now(
         ZoneInfo("Asia/Seoul")
-    ).isoformat(
-        timespec="seconds"
-    )
-
-    payload = {
-        "version": SAVED_RESULT_VERSION,
-        "recent_signal_days": RECENT_SIGNAL_DAYS,
-        "recent_signal_limit": RECENT_SIGNAL_LIMIT,
-        "saved_at": saved_at,
-        "period": list(period),
-        "records": records,
-        "results": saved_results,
-    }
-
-    temporary_path = (
-        OUTPUT_DIR
-        / f".last_analysis_{uuid.uuid4().hex}.tmp"
-    )
+    ).isoformat(timespec="seconds")
 
     try:
-        temporary_path.write_text(
-            json.dumps(
-                json_safe(payload),
-                ensure_ascii=False,
-                allow_nan=False,
-            ),
-            encoding="utf-8",
+        payload = result_store.build_snapshot(
+            results=results,
+            records=records,
+            period=period,
+            saved_at=saved_at,
+            complete=complete,
+            meta={
+                "recent_signal_days": RECENT_SIGNAL_DAYS,
+                "recent_signal_limit": RECENT_SIGNAL_LIMIT,
+            },
         )
 
-        os.replace(
-            temporary_path,
-            LAST_RESULT_FILE,
-        )
+        RESULT_STORE.save(payload)
 
-    finally:
-        temporary_path.unlink(
-            missing_ok=True
+    except Exception as error:
+        # 저장 실패가 분석 자체를 막지는 않습니다.
+        st.session_state["save_error"] = (
+            f"{type(error).__name__}: {error}"
         )
+        return False
 
     st.session_state["last_saved_at"] = saved_at
+    st.session_state.pop("save_error", None)
+    return True
 
 
-# =========================================================
-# 마지막 결과 복원
-# =========================================================
+def apply_restored_result(restored):
+    """복원된 결과를 세션 상태에 반영합니다."""
+    st.session_state["batch_results"] = restored["results"]
+    st.session_state["batch_records"] = restored["records"]
+    st.session_state["batch_period"] = restored["period"]
+    st.session_state["last_saved_at"] = restored["saved_at"]
+
+    notes = list(restored.get("notes") or [])
+
+    if notes:
+        st.session_state["restore_notice"] = " ".join(notes)
+
 
 def load_last_analysis():
-    if not LAST_RESULT_FILE.is_file():
-        return False
+    """
+    재접속(새 세션) 시 마지막 저장 결과를 복원합니다.
 
-    payload = json.loads(
-        LAST_RESULT_FILE.read_text(
-            encoding="utf-8"
-        )
-    )
+    Streamlit Cloud는 세션이 끊기면 st.session_state가 사라지므로,
+    이 함수가 '다시 접속했을 때 결과가 보이는' 경로입니다.
+    """
+    try:
+        payload = RESULT_STORE.load()
 
-    if (
-        payload.get("version")
-        != SAVED_RESULT_VERSION
-        or payload.get("recent_signal_days")
-        != RECENT_SIGNAL_DAYS
-        or payload.get("recent_signal_limit")
-        != RECENT_SIGNAL_LIMIT
-    ):
+    except Exception as error:
         st.session_state["restore_notice"] = (
-            "이전 형식의 저장 결과가 있습니다. "
-            "PER·최근 7일 신호·최근 3건 표시를 "
-            "적용하려면 '분석 실행'을 다시 눌러주세요."
+            "저장된 결과를 읽지 못했습니다"
+            f"({type(error).__name__}). "
+            "저장소 설정을 확인해 주세요."
         )
         return False
 
-    restored = []
-
-    for item in payload.get("results", []):
-        latest = item["latest"]
-
-        required = {
-            "Weekly 신호",
-            "Weekly+Monthly 신호",
-            "Weekly 신호일",
-            "Weekly+Monthly 신호일",
-            "신호 조회 일수",
-            "PER",
-            "PER 분기",
-        }
-
-        if (
-            not required.issubset(latest)
-            or latest["신호 조회 일수"]
-            != RECENT_SIGNAL_DAYS
-        ):
-            st.session_state["restore_notice"] = (
-                "저장 결과에 최신 신호 또는 PER 정보가 "
-                "없습니다. '분석 실행'을 다시 눌러주세요."
-            )
-            return False
-
-        encoded_png = item.get(
-            "png_base64"
-        )
-
-        restored.append({
-            "stock_name": item["stock_name"],
-            "ticker": item["ticker"],
-            "latest": latest,
-            "messages": item.get(
-                "messages",
-                [],
-            ),
-            "image_filename": item.get(
-                "image_filename"
-            ),
-            "png_bytes": (
-                base64.b64decode(
-                    encoded_png,
-                    validate=True,
-                )
-                if encoded_png
-                else None
-            ),
-            "weekly_signals": json_data_to_dataframe(
-                item["weekly_signals"]
-            ),
-            "combined_signals": json_data_to_dataframe(
-                item["combined_signals"]
-            ),
-            "metrics": json_data_to_dataframe(
-                item["metrics"]
-            ),
-            "trades": {
-                strategy: json_data_to_dataframe(frame_data)
-                for strategy, frame_data
-                in item["trades"].items()
-            },
-        })
-
-    if not restored:
+    if not payload:
         return False
 
-    st.session_state["batch_results"] = restored
+    try:
+        restored = result_store.restore_snapshot(
+            payload,
+            image_dir=IMAGE_DIR,
+        )
 
-    st.session_state["batch_records"] = (
-        payload.get("records", [])
-    )
+    except result_store.SnapshotError as error:
+        st.session_state["restore_notice"] = (
+            f"{error} '분석 실행'을 다시 눌러 주세요."
+        )
+        return False
 
-    st.session_state["batch_period"] = (
-        payload.get("period")
-    )
+    except Exception as error:
+        st.session_state["restore_notice"] = (
+            "저장된 결과 형식이 올바르지 않습니다"
+            f"({type(error).__name__}). "
+            "'분석 실행'을 다시 눌러 주세요."
+        )
+        return False
 
-    st.session_state["last_saved_at"] = (
-        payload.get("saved_at")
-    )
-
+    apply_restored_result(restored)
     return True
 
 
@@ -2316,6 +2256,22 @@ def run_batch(
         del analysis
         del frame
 
+        # -------------------------------------------------
+        # 중간 저장(checkpoint)
+        # 긴 실행 중 브라우저를 닫거나 앱이 잠들어도
+        # 직전 종목까지의 결과가 저장소에 남습니다.
+        # -------------------------------------------------
+
+        save_last_analysis(
+            results=results,
+            records=records,
+            period=(
+                start.isoformat(),
+                end.isoformat(),
+            ),
+            complete=False,
+        )
+
         progress.progress(
             index / total
         )
@@ -2357,6 +2313,7 @@ def run_batch(
                     start.isoformat(),
                     end.isoformat(),
                 ),
+                complete=True,
             )
 
         except Exception as error:
@@ -2778,6 +2735,120 @@ with st.sidebar:
             "last_analysis_checked"
         ] = True
 
+    # -----------------------------------------------------
+    # 마지막 결과 보관·복원
+    # -----------------------------------------------------
+
+    st.divider()
+
+    with st.expander("마지막 결과 보관·복원"):
+        st.caption(
+            f"저장 위치: {RESULT_STORE.describe()}"
+        )
+
+        saved_at_text = st.session_state.get(
+            "last_saved_at"
+        )
+
+        if saved_at_text:
+            st.caption(
+                f"마지막 저장: {saved_at_text}"
+            )
+
+        save_error = st.session_state.get(
+            "save_error"
+        )
+
+        if save_error:
+            st.warning(
+                f"마지막 저장 실패: {save_error}"
+            )
+
+        # 1) 내려받기: 재배포로 컨테이너가 초기화되어도
+        #    이 파일만 있으면 그대로 복원할 수 있습니다.
+        try:
+            snapshot_bytes = RESULT_STORE.download_bytes()
+
+        except Exception as error:
+            snapshot_bytes = None
+            st.warning(
+                "저장 파일을 내려받지 못했습니다: "
+                f"{type(error).__name__}"
+            )
+
+        if snapshot_bytes:
+            file_stamp = str(
+                saved_at_text or ""
+            ).replace("-", "").replace(":", "").replace("T", "_")[:15]
+
+            st.download_button(
+                "결과 파일 내려받기 (.json.gz)",
+                data=snapshot_bytes,
+                file_name=(
+                    f"last_analysis_{file_stamp}.json.gz"
+                    if file_stamp
+                    else "last_analysis.json.gz"
+                ),
+                mime="application/gzip",
+                key="download_last_analysis",
+                use_container_width=True,
+            )
+
+        else:
+            st.caption(
+                "아직 저장된 결과가 없습니다."
+            )
+
+        # 2) 올리기: 내려받은 파일로 복원
+        uploaded = st.file_uploader(
+            "결과 파일 올려서 복원",
+            type=["gz", "json"],
+            key="upload_last_analysis",
+        )
+
+        if uploaded is not None and st.button(
+            "업로드한 결과 복원",
+            key="restore_from_upload",
+            use_container_width=True,
+        ):
+            try:
+                payload = result_store.loads(
+                    uploaded.getvalue()
+                )
+
+                restored = result_store.restore_snapshot(
+                    payload,
+                    image_dir=IMAGE_DIR,
+                )
+
+                apply_restored_result(restored)
+                RESULT_STORE.save(payload)
+
+                st.success(
+                    "업로드한 결과를 복원했습니다."
+                )
+                st.rerun()
+
+            except Exception as error:
+                st.error(
+                    "복원에 실패했습니다: "
+                    f"{error}"
+                )
+
+        # 3) 저장소에서 다시 읽기
+        if st.button(
+            "저장된 결과 다시 불러오기",
+            key="reload_last_analysis",
+            use_container_width=True,
+        ):
+            if load_last_analysis():
+                st.rerun()
+
+            else:
+                st.info(
+                    "불러올 저장 결과가 없습니다."
+                )
+
 
 # =========================================================
 # 오른쪽: 분석 실행 및 결과
@@ -2842,6 +2913,13 @@ period = st.session_state.get(
 saved_at = st.session_state.get(
     "last_saved_at"
 )
+
+if saved_at:
+    st.caption(
+        f"마지막 저장 {saved_at} · "
+        f"{RESULT_STORE.describe()} · "
+        "재접속하면 이 결과가 자동으로 다시 표시됩니다."
+    )
 
 # 저장 결과 복원 또는 화면 재실행 시 요약표 표시
 if not batch_started:
