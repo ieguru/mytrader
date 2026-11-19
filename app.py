@@ -849,6 +849,28 @@ def render_signal_card(
 # 전체 결과 요약표
 # =========================================================
 
+def trend_lights_cell(latest):
+    """
+    요약표 한 칸에 들어갈 추세 신호등(일·주·월) HTML을 만듭니다.
+
+    상세 화면의 카드와 같은 색 규칙을 씁니다.
+    상승=빨강 / 하락=파랑 / 보합=회색 / 값 없음=점선
+    """
+    parts = []
+
+    for name, key in TREND_LIGHTS:
+        css = trend_state(latest.get(key))
+
+        parts.append(
+            '<span class="ov-trend">'
+            f'<span class="ov-dot {css}"></span>'
+            f'<span class="ov-name">{name}</span>'
+            "</span>"
+        )
+
+    return '<span class="ov-trends">' + "".join(parts) + "</span>"
+
+
 def render_results_overview(results):
     """종목명·신호 클릭 시 해당 종목 상세분석으로 이동."""
     if not results:
@@ -924,11 +946,18 @@ def render_results_overview(results):
             f'{combined_html}</a>'
         )
 
+        trend_link = (
+            f'<a href="#{anchor}" target="_self" '
+            'style="display:block;text-decoration:none;">'
+            f'{trend_lights_cell(latest)}</a>'
+        )
+
         rows.append(
             '<tr>'
             f'<td>{name_link}</td>'
             f'<td>{weekly_link}</td>'
             f'<td>{combined_link}</td>'
+            f'<td>{trend_link}</td>'
             '</tr>'
         )
 
@@ -959,14 +988,41 @@ def render_results_overview(results):
         '.stock-overview-table tbody tr:hover {'
         'background:#f5f6ff;'
         '}'
+        '.stock-overview-table .ov-trends {'
+        'display:inline-flex;gap:12px;align-items:flex-start;'
+        '}'
+        '.stock-overview-table .ov-trend {'
+        'display:inline-flex;flex-direction:column;'
+        'align-items:center;gap:3px;min-width:16px;'
+        '}'
+        '.stock-overview-table .ov-dot {'
+        'width:12px;height:12px;border-radius:50%;'
+        'display:inline-block;'
+        '}'
+        '.stock-overview-table .ov-dot.up {'
+        'background:#dc2626;box-shadow:0 0 0 2px #fecaca;'
+        '}'
+        '.stock-overview-table .ov-dot.down {'
+        'background:#2563eb;box-shadow:0 0 0 2px #bfdbfe;'
+        '}'
+        '.stock-overview-table .ov-dot.flat {'
+        'background:#e2e8f0;box-shadow:0 0 0 2px #eef2f7;'
+        '}'
+        '.stock-overview-table .ov-dot.none {'
+        'background:#fff;border:2px dashed #cbd5e1;'
+        '}'
+        '.stock-overview-table .ov-name {'
+        'font-size:10px;line-height:1;font-weight:700;'
+        'color:#94a3b8;'
+        '}'
         '</style>'
         '<div style="overflow-x:auto;">'
         '<table class="stock-overview-table">'
         '<thead><tr>'
         '<th>종목</th>'
-        f'<th>주간 신호 · 최근 {RECENT_SIGNAL_DAYS}일</th>'
-        '<th>주간·월간 결합 신호 · '
-        f'최근 {RECENT_SIGNAL_DAYS}일</th>'
+        '<th>최근 주간신호</th>'
+        '<th>최근 주간·월간신호</th>'
+        '<th>일간/주간/월간 추세</th>'
         '</tr></thead><tbody>'
         + "".join(rows)
         + '</tbody></table></div>'
