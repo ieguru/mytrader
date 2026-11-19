@@ -1102,6 +1102,30 @@ def prepare_price_frame(frame):
 # 분석 실행
 # =========================================================
 
+def trend_flag(row, column):
+    """
+    추세 값(+1 상승 / -1 하락 / 0 없음)을 JSON 친화적 정수로 돌려줍니다.
+    값이 없거나 계산 불가면 None입니다(화면에서 회색 원).
+    """
+    if column not in row.index:
+        return None
+
+    value = row.get(column)
+
+    if value is None or pd.isna(value):
+        return None
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not np.isfinite(number):
+        return None
+
+    return int(np.sign(number))
+
+
 def analyze_frame(
     frame,
     stock_name,
@@ -1259,6 +1283,12 @@ def analyze_frame(
             "Weekly_Monthly_Buy",
             "Weekly_Monthly_Sell",
         ),
+
+        # 추세 신호등용 값: 마지막 거래일 기준
+        # (+1 상승 / -1 하락 / 0 보합 / None 계산 불가)
+        "Daily_Trend": trend_flag(latest_row, "Daily_Trend"),
+        "Weekly_Trend": trend_flag(latest_row, "Weekly_Trend"),
+        "Monthly_Trend": trend_flag(latest_row, "Monthly_Trend"),
     }
 
     return {

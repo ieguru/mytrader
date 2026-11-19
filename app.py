@@ -203,6 +203,40 @@ st.markdown(
         font-weight:800; letter-spacing:-0.025em; color:var(--ink);
     }
 
+    /* ---------- 최근 종가 · PER 값 크기(기본의 절반) ---------- */
+    .st-key-price_per_row [data-testid="stMetric"] {
+        padding:16px 20px 13px;
+    }
+    .st-key-price_per_row [data-testid="stMetricValue"] {
+        font-size:.88rem; font-weight:700; letter-spacing:-0.01em;
+    }
+
+    /* ---------- 일간/주간/월간 추세 신호등 ---------- */
+    .trend-card {
+        position:relative; background:var(--surface);
+        border:1px solid var(--line); border-radius:var(--radius-lg);
+        padding:16px 20px 13px; box-shadow:var(--shadow-xs);
+        overflow:hidden; height:100%;
+    }
+    .trend-card::before {
+        content:''; position:absolute; left:0; top:0; bottom:0; width:4px;
+        background:linear-gradient(180deg,var(--accent),#8b5cf6);
+    }
+    .trend-card .trend-label {
+        color:var(--muted); font-weight:600; font-size:.87rem;
+        margin-bottom:10px;
+    }
+    .trend-lights { display:flex; gap:18px; align-items:flex-start; }
+    .trend-light { display:flex; flex-direction:column; align-items:center; gap:5px; }
+    .trend-dot {
+        width:15px; height:15px; border-radius:50%; display:inline-block;
+        box-shadow:0 0 0 3px rgba(15,23,42,.05);
+    }
+    .trend-dot.up   { background:#dc2626; }   /* 상승: 빨간 원 */
+    .trend-dot.down { background:#2563eb; }   /* 하락: 파란 원 */
+    .trend-dot.flat { background:#cbd5e1; }   /* 보합·계산 불가 */
+    .trend-name { font-size:.7rem; color:var(--faint); font-weight:600; }
+
     /* ---------- 펼침 메뉴 ---------- */
     [data-testid="stExpander"] {
         border:1px solid var(--line); border-radius:var(--radius);
@@ -1383,6 +1417,53 @@ def make_trade_table(trades, strategy):
 # 宗목 상세 결과
 # =========================================================
 
+TREND_LIGHTS = (
+    ("일", "Daily_Trend"),
+    ("주", "Weekly_Trend"),
+    ("월", "Monthly_Trend"),
+)
+
+
+def trend_dot_class(value):
+    """+1 상승(빨강) / -1 하락(파랑) / 그 외 회색."""
+    number = to_finite_number(value)
+
+    if number is None:
+        return "flat"
+
+    if number > 0:
+        return "up"
+
+    if number < 0:
+        return "down"
+
+    return "flat"
+
+
+def render_trend_lights(latest):
+    """일간·주간·월간 추세를 신호등(원) 3개로 표시합니다."""
+    dots = []
+
+    for name, key in TREND_LIGHTS:
+        css = trend_dot_class(latest.get(key))
+
+        dots.append(
+            '<div class="trend-light">'
+            f'<span class="trend-dot {css}"></span>'
+            f'<span class="trend-name">{name}</span>'
+            "</div>"
+        )
+
+    st.markdown(
+        '<div class="trend-card">'
+        '<div class="trend-label">일간/주간/월간 추세</div>'
+        '<div class="trend-lights">'
+        + "".join(dots)
+        + "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_stock_result(result, position):
     name = result["stock_name"]
     ticker = result["ticker"]
@@ -1410,38 +1491,42 @@ def render_stock_result(result, position):
     )
 
     # -----------------------------------------------------
-    # 첫 번째 줄: 최근 종가 / PER
+    # 첫 번째 줄: 최근 종가 / PER / 일간·주간·월간 추세
     # -----------------------------------------------------
 
-    price_column, per_column = st.columns(2)
+    with st.container(key="price_per_row"):
+        price_column, per_column, trend_column = st.columns(3)
 
-    with price_column:
-        close_price = to_finite_number(
-            latest.get("종가")
-        )
+        with price_column:
+            close_price = to_finite_number(
+                latest.get("종가")
+            )
 
-        st.metric(
-            "최근 종가",
-            (
-                f"{close_price:,.0f}원"
-                if close_price is not None
-                else "—"
-            ),
-        )
+            st.metric(
+                "최근 종가",
+                (
+                    f"{close_price:,.0f}원"
+                    if close_price is not None
+                    else "—"
+                ),
+            )
 
-    with per_column:
-        per_value = to_finite_number(
-            latest.get("PER")
-        )
+        with per_column:
+            per_value = to_finite_number(
+                latest.get("PER")
+            )
 
-        st.metric(
-            "PER",
-            (
-                f"{per_value:,.2f}배"
-                if per_value is not None
-                else "—"
-            ),
-        )
+            st.metric(
+                "PER",
+                (
+                    f"{per_value:,.2f}배"
+                    if per_value is not None
+                    else "—"
+                ),
+            )
+
+        with trend_column:
+            render_trend_lights(latest)
 
     # -----------------------------------------------------
     # 두 번째 줄: 최근 7일 매매 신호
@@ -1451,10 +1536,7 @@ def render_stock_result(result, position):
 
     with weekly_column:
         render_signal_card(
-            title=(
-                "주간 신호 · "
-                f"최근 {RECENT_SIGNAL_DAYS}일"
-            ),
+            title="최근 주간신호",
             signal=latest.get(
                 "Weekly 신호",
                 "신호 없음",
@@ -1467,10 +1549,7 @@ def render_stock_result(result, position):
 
     with combined_column:
         render_signal_card(
-            title=(
-                "주간·월간 결합 신호 · "
-                f"최근 {RECENT_SIGNAL_DAYS}일"
-            ),
+            title="최근 주간·월간신호",
             signal=latest.get(
                 "Weekly+Monthly 신호",
                 "신호 없음",
@@ -2910,31 +2989,19 @@ if not batch_started:
         )
 
 with summary_container:
-    if records:
-        st.markdown(
-            "### 종목별 실행 내역"
+    if records and not results:
+        st.error(
+            "표시할 분석 결과가 없습니다. "
+            "실행 내역의 '상태'와 '내용'을 확인하세요."
         )
 
-        st.dataframe(
-            pd.DataFrame(records),
-            hide_index=True,
-            use_container_width=True,
+        st.info(
+            "모든 종목이 '건너뜀'이면 "
+            "file 폴더에 종목명.xlsx 파일이 "
+            "있는지 확인하세요. "
+            "등록 종목명, 엑셀 파일명, 시트명이 "
+            "정확히 같아야 합니다."
         )
-
-        if not results:
-            st.error(
-                "표시할 분석 결과가 없습니다. "
-                "실행 내역의 '상태'와 "
-                "'내용'을 확인하세요."
-            )
-
-            st.info(
-                "모든 종목이 '건너뜀'이면 "
-                "file 폴더에 종목명.xlsx 파일이 "
-                "있는지 확인하세요. "
-                "등록 종목명, 엑셀 파일명, 시트명이 "
-                "정확히 같아야 합니다."
-            )
 
 # 이번 분석에서 이미 표시한 상세 결과는 중복 표시하지 않습니다.
 if not batch_started:
