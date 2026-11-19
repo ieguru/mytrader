@@ -55,6 +55,7 @@ from analysis_engine import analyze_frame, recent_signals
 from charts import make_chart_png
 from data_collector import fetch_data
 
+import per_status
 import result_store
 
 
@@ -574,125 +575,29 @@ def cached_read_per_financial(
     file_size,
 ):
     """
+    PER 재무 엑셀을 읽습니다(캐시).
+
     파일 변경 시 modified_ns/file_size가 달라져 다시 읽습니다.
-
-    필수 컬럼:
-        분기, 상장주식수, 4Q_income
-
-    단위:
-        상장주식수: 주
-        4Q_income: 억원
+    검증·계산 규칙은 per_status.py와 공유합니다.
     """
-    with pd.ExcelFile(excel_path) as workbook:
-        if stock_name not in workbook.sheet_names:
-            raise ValueError(
-                f"엑셀에 '{stock_name}' 시트가 없습니다."
-            )
-
-        frame = pd.read_excel(
-            workbook,
-            sheet_name=stock_name,
-        )
-
-    frame = frame.dropna(how="all").copy()
-    frame.columns = [
-        str(column).strip()
-        for column in frame.columns
-    ]
-
-    if frame.columns.duplicated().any():
-        raise ValueError(
-            "PER 재무 데이터에 중복된 컬럼이 있습니다."
-        )
-
-    required = {
-        "분기",
-        "상장주식수",
-        "4Q_income",
-    }
-
-    missing = required - set(frame.columns)
-
-    if missing:
-        raise ValueError(
-                "PER 계산에 필요한 엑셀 컬럼이 없습니다: "
-                + ", ".join(sorted(missing))
-        )
-
-    frame["분기"] = (
-        frame["분기"]
-        .astype("string")
-        .str.strip()
-    )
-
-    valid_quarter = frame["분기"].str.fullmatch(
-        r"\d{4}\.[1-4]Q",
-        na=False,
-    )
-
-    if not valid_quarter.all():
-        raise ValueError(
-            "PER 재무 데이터의 분기는 "
-            "'2026.1Q' 형식이어야 합니다."
-        )
-
-    if frame["분기"].duplicated().any():
-        raise ValueError(
-            "PER 재무 데이터에 중복된 분기가 있습니다."
-        )
-
-    quarter_ends = []
-
-    for quarter_label in frame["분기"]:
-        matched = re.fullmatch(
-            r"(\d{4})\.([1-4])Q",
-            quarter_label,
-        )
-
-        year = int(matched.group(1))
-        quarter = int(matched.group(2))
-
-        quarter_end = pd.Period(
-            f"{year}Q{quarter}",
-            freq="Q-DEC",
-        ).end_time.normalize()
-
-        quarter_ends.append(quarter_end)
-
-    frame["_분기종료일"] = pd.to_datetime(
-        quarter_ends
-    )
-
-    for column in ("상장주식수", "4Q_income"):
-        frame[column] = frame[column].map(
-            to_finite_number
-        )
-
-    return (
-        frame
-        .sort_values("_분기종료일")
-        .reset_index(drop=True)
+    return per_status.read_per_financial(
+        excel_path,
+        stock_name,
     )
 
 
-def build_per_status(excel_path, stock_name, latest):
+def build_per_status(
+    excel_path,
+    stock_name,
+    latest,
+):
     """
-    가격 기준일까지 종료된 분기 중 가장 최근 행을 사용합니다.
+    기준일 종가 기준 PER을 계산합니다.
 
-    PER =
-        종가 × 상장주식수
-        ÷ (4Q_income × 100,000,000)
-
-    가장 최근 종료 분기 값이 누락된 경우,
-    더 오래된 분기로 임의 대체하지 않습니다.
+    계산식은 per_status.build_per_status에 위임합니다
+    (batch_daily.py와 동일한 규칙을 쓰기 위해서입니다).
     """
-    status = {
-        "PER": None,
-        "PER 분기": None,
-        "PER 상장주식수": None,
-        "PER 4Q_income": None,
-        "PER 설명": "",
-    }
+    status = per_status.empty_per_status()
 
     reference = normalize_date(
         latest.get("기준일")
@@ -730,71 +635,11 @@ def build_per_status(excel_path, stock_name, latest):
         )
         return status
 
-    completed = financial.loc[
-        financial["_분기종료일"] <= reference
-    ]
-
-    if completed.empty:
-        status["PER 설명"] = (
-            "기준일까지 종료된 분기 데이터가 없습니다."
-        )
-        return status
-
-    row = completed.iloc[-1]
-
-    shares = to_finite_number(
-        row["상장주식수"]
+    return per_status.build_per_status(
+        financial,
+        reference,
+        close_price,
     )
-    income = to_finite_number(
-        row["4Q_income"]
-    )
-
-    status.update({
-        "PER 분기": str(row["분기"]),
-        "PER 상장주식수": shares,
-        "PER 4Q_income": income,
-    })
-
-    if shares is None or shares <= 0:
-        status["PER 설명"] = (
-            f'{row["분기"]}: '
-            "상장주식수가 없거나 0 이하입니다."
-        )
-        return status
-
-    if not shares.is_integer():
-        status["PER 설명"] = (
-            f'{row["분기"]}: '
-            "상장주식수는 주 단위 정수여야 합니다."
-        )
-        return status
-
-    if income is None or income <= 0:
-        status["PER 설명"] = (
-            f'{row["분기"]}: '
-            "4Q_income이 없거나 0 이하입니다."
-        )
-        return status
-
-    per_value = (
-        close_price
-        * shares
-        / (income * 100_000_000)
-    )
-
-    if not math.isfinite(per_value):
-        status["PER 설명"] = (
-            "PER 계산 결과가 유효하지 않습니다."
-        )
-        return status
-
-    status["PER"] = per_value
-    status["PER 설명"] = (
-        f'{row["분기"]} 엑셀 값 기준 · '
-        "4Q_income 단위: 억원"
-    )
-
-    return status
 
 
 # =========================================================

@@ -1,0 +1,114 @@
+name: 매일 종목 분석 (20:01 KST)
+
+# 시각·주기는 config/schedule.json(앱의 '스케줄 설정' 페이지)에서 정합니다.
+# 고정 cron은 YAML에만 쓸 수 있어 앱 설정을 따라오지 못하므로,
+# 이 워크플로는 매시간 :05(KST)에 깨어나 schedule_gate.py로
+# '지금이 실행 시간인가'만 판정하고 통과할 때만 분석합니다.
+on:
+  schedule:
+    - cron: "5 * * * *"        # 매시간 UTC :05 = KST :05
+  workflow_dispatch: {}        # 수동 실행(설정과 무관하게 즉시 실행)
+
+permissions:
+  contents: write              # 결과 커밋용
+
+concurrency:
+  group: daily-analysis
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    env:
+      KRX_ID: ${{ secrets.KRX_ID }}
+      KRX_PW: ${{ secrets.KRX_PW }}
+      # 텔레그램 알림 (없으면 자동으로 건너뜀)
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PYTHONUNBUFFERED: "1"
+      TZ: Asia/Seoul
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 한글 폰트 설치 (차트 한글 깨짐 방지)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-nanum
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 스케줄 판정
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python schedule_gate.py --force
+          else
+            python schedule_gate.py
+          fi
+
+      - name: 분석 실행
+        id: run
+        if: steps.gate.outputs.due == 'true'
+        run: python batch_daily.py
+
+      # 분석이 실패해도 '실패했다'는 알림은 보내야 합니다.
+      - name: 실패 알림
+        if: failure() && steps.gate.outputs.due == 'true'
+
+        env:
+          TELEGRAM_DISABLE: ""
+        run: |
+          python - <<'PY'
+          import os
+          import notifier
+
+          config = notifier.config_from_env(os.environ)
+
+          if not config.configured:
+              print("텔레그램 설정 없음 — 실패 알림 생략")
+              raise SystemExit(0)
+
+          notifier.TelegramNotifier(config).send_message(
+              "❌ <b>일일 분석 배치 실패</b>\n"
+              "GitHub Actions 로그를 확인하세요."
+          )
+          print("실패 알림 전송 완료")
+          PY
+
+      - name: 오래된 차트 정리 (10일 보관)
+        if: always()
+        run: |
+          find img -type f -mtime +10 -delete 2>/dev/null || true
+
+      - name: 실행 내역 아티팩트 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-status
+          path: output/run_status_*.csv
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: 결과 커밋 (Streamlit Cloud 재배포 → 앱이 자동 복원)
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A img output
+          if git diff --cached --quiet; then
+            echo "변경 사항 없음 — 커밋 생략"
+            exit 0
+          fi
+          git commit -m "chore: 일일 분석 결과 $(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M')"
+          git push

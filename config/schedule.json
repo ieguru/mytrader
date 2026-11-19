@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "enabled": true,
+  "period": "daily",
+  "hour": 20,
+  "minute": 1,
+  "weekday": 0,
+  "notify": true,
+  "timezone": "Asia/Seoul",
+  "updated_at": "2026-11-19T19:13:14+09:00",
+  "note": ""
+}
