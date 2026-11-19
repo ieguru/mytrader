@@ -204,15 +204,16 @@ st.markdown(
     }
 
     /* ---------- 최근 종가 · PER · 추세: 같은 행, 같은 높이 ---------- */
-    .st-key-price_per_row {
+    /* 키가 종목마다 달라지므로 접두어로 매칭합니다. */
+    [class*="st-key-price_per_row"] {
         --metric-h: 96px;
     }
-    .st-key-price_per_row [data-testid="stMetric"] {
+    [class*="st-key-price_per_row"] [data-testid="stMetric"] {
         min-height:var(--metric-h);
         padding:16px 20px;
         display:flex; flex-direction:column; justify-content:center;
     }
-    .st-key-price_per_row [data-testid="stMetricValue"] {
+    [class*="st-key-price_per_row"] [data-testid="stMetricValue"] {
         font-size:.88rem; font-weight:700; letter-spacing:-0.01em;
     }
 
@@ -1530,7 +1531,9 @@ def render_stock_result(result, position):
     # 첫 번째 줄: 최근 종가 / PER / 일간·주간·월간 추세
     # -----------------------------------------------------
 
-    with st.container(key="price_per_row"):
+    # 위젯 키는 문서 전체에서 유일해야 합니다.
+    # 여러 종목을 한 화면에 그리므로 position·ticker를 붙입니다.
+    with st.container(key=f"price_per_row_{position}_{ticker}"):
         price_column, per_column, trend_column = st.columns(3)
 
         with price_column:
