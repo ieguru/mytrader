@@ -1126,31 +1126,321 @@ def trend_flag(row, column):
     return int(np.sign(number))
 
 
-NOMAD_SURGE_RATIO = 2.0    # 거래량 폭등: 전일의 2배 이상
-NOMAD_DRY_RATIO = 0.25     # 다음날 급감: 폭등일의 25% 이하
+NOMAD_SURGE_RATIO = 2.0    # 거래량 폭등: 전일 대비 2배 이상
+NOMAD_DRY_RATIO = 0.25     # 거래량 급감: 폭등일 거래량의 25% 이하
+NOMAD_RECENT_DAYS = 3      # 폭등일은 마지막 거래일 기준 최근 3거래일 이내
+NOMAD_DRY_DAYS = (1, 2)    # 폭등일 이후 1~2일 연속 음봉
+
+
+def nomad_patterns(
+    df,
+    surge_ratio=NOMAD_SURGE_RATIO,
+    dry_ratio=NOMAD_DRY_RATIO,
+    recent_days=None,
+    dry_days=NOMAD_DRY_DAYS,
+):
+    """
+    유목민 매수 패턴을 전 구간에서 찾습니다. (차트 별표·성과 집계용)
+
+    규칙
+        ① 폭등일 g: 거래량[g] >= 거래량[g-1] x 2   (전일 대비 2배 이상)
+        ② 폭등일 g: 종가[g] > 종가[g-1]            (상승)
+        ③ 이후 1~2거래일 연속 음봉: 종가 < 시가
+        ④ 그 음봉일들의 거래량 <= 거래량[g] x 0.25
+        ⑤ recent_days가 주어지면 데이터 끝에서 그만큼 이내의 폭등만 인정
+
+    신호는 마지막 음봉일(패턴이 완성된 날)에 표시합니다.
+    같은 폭등일에 1일 완성과 2일 완성이 겹치면 더 늦은 쪽(긴 음봉)만 남겨
+    한 번의 패턴이 두 번 집계되지 않게 합니다.
+    """
+    frame = pd.DataFrame(index=df.index)
+    columns = (
+        "유목민신호",
+        "유목민신호일수",
+        "유목민 거래량배수",
+        "유목민 급감비율",
+        "유목민 폭등상승률",
+        "유목민 음봉등락률",
+        "유목민 폭등일",
+        "유목민 음봉일",
+        "유목민 음봉일목록",
+    )
+
+    for column in columns:
+        frame[column] = 0 if column in ("유목민신호", "유목민신호일수") else None
+
+    if df is None or df.empty:
+        return frame
+
+    if not {"시가", "종가", "거래량"}.issubset(df.columns):
+        return frame
+
+    volume = pd.to_numeric(df["거래량"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(df.index)
+
+    count = len(df)
+    last = count - 1
+    candidates = {}
+
+    for index in range(count):
+        for days in sorted(dry_days, reverse=True):
+            spike = index - days
+            base = spike - 1
+
+            if base < 0:
+                continue
+
+            if recent_days is not None and last - spike > recent_days:
+                continue
+
+            values = (volume[base], volume[spike], close[base], close[spike])
+
+            if not all(np.isfinite(values)) or values[0] <= 0 or values[1] <= 0:
+                continue
+
+            if volume[spike] < volume[base] * surge_ratio:
+                continue
+
+            if close[spike] <= close[base]:
+                continue
+
+            dry_slice = range(spike + 1, index + 1)
+
+            bearish = all(
+                np.isfinite(open_price[j])
+                and np.isfinite(close[j])
+                and close[j] < open_price[j]
+                for j in dry_slice
+            )
+
+            if not bearish:
+                continue
+
+            quiet = all(
+                np.isfinite(volume[j]) and volume[j] <= volume[spike] * dry_ratio
+                for j in dry_slice
+            )
+
+            if not quiet:
+                continue
+
+            if spike not in candidates or index >= candidates[spike][0]:
+                candidates[spike] = (index, days)
+
+            break
+
+    for spike, (index, days) in sorted(candidates.items()):
+        dry_slice = range(spike + 1, index + 1)
+        day_change = 0.0
+
+        if index >= 1 and np.isfinite(close[index - 1]) and close[index - 1]:
+            day_change = (close[index] / close[index - 1] - 1) * 100
+
+        frame.iloc[index, frame.columns.get_loc("유목민신호")] = 1
+        frame.iloc[index, frame.columns.get_loc("유목민신호일수")] = days
+        frame.iloc[index, frame.columns.get_loc("유목민 거래량배수")] = round(
+            volume[spike] / volume[spike - 1], 2
+        )
+        frame.iloc[index, frame.columns.get_loc("유목민 급감비율")] = round(
+            max(volume[j] for j in dry_slice) / volume[spike] * 100, 1
+        )
+        frame.iloc[index, frame.columns.get_loc("유목민 폭등상승률")] = round(
+            (close[spike] / close[spike - 1] - 1) * 100, 2
+        )
+        frame.iloc[index, frame.columns.get_loc("유목민 음봉등락률")] = round(
+            day_change, 2
+        )
+        frame.iloc[index, frame.columns.get_loc("유목민 폭등일")] = dates[
+            spike
+        ].strftime("%Y-%m-%d")
+        frame.iloc[index, frame.columns.get_loc("유목민 음봉일")] = dates[
+            index
+        ].strftime("%Y-%m-%d")
+        frame.iloc[index, frame.columns.get_loc("유목민 음봉일목록")] = ", ".join(
+            dates[j].strftime("%Y-%m-%d") for j in dry_slice
+        )
+
+    return frame
+
+
+def pattern_index(patterns):
+    """nomad_patterns 결과에서 신호가 1인 위치(bool 배열)를 돌려줍니다."""
+    return patterns["유목민신호"].to_numpy(dtype=int) == 1
+
+
+NOMAD_FORWARD_DAYS = (5, 10, 20)
+
+
+def nomad_signal_stats(
+    df,
+    horizons=NOMAD_FORWARD_DAYS,
+    surge_ratio=NOMAD_SURGE_RATIO,
+    dry_ratio=NOMAD_DRY_RATIO,
+    dry_days=NOMAD_DRY_DAYS,
+):
+    """
+    과거 유목민 매수 신호가 난 뒤 5·10·20거래일 수익률을 집계합니다.
+
+    - 진입: 신호 다음 거래일 시가 (신호는 종가 확정 후 알 수 있으므로)
+    - 청산: 신호일 + N거래일 종가
+    - 기준선: 같은 진입 규칙으로 전 구간 아무 날에나 진입했을 때의
+      상승 비율. 이보다 낮으면 신호에 우위가 없다는 뜻입니다.
+    """
+    empty = {
+        "신호수": 0,
+        "기간": None,
+        "보유기간": list(horizons),
+        "요약": [],
+        "신호목록": [],
+    }
+
+    if df is None or df.empty or not {"시가", "종가", "거래량"}.issubset(df.columns):
+        return empty
+
+    patterns = nomad_patterns(
+        df,
+        surge_ratio=surge_ratio,
+        dry_ratio=dry_ratio,
+        dry_days=dry_days,
+    )
+
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(df.index)
+    count = len(df)
+
+    empty["기간"] = [
+        dates[0].strftime("%Y-%m-%d"),
+        dates[-1].strftime("%Y-%m-%d"),
+    ]
+
+    signal_index = np.flatnonzero(pattern_index(patterns))
+    records = []
+
+    for index in signal_index:
+        entry_index = index + 1
+
+        if entry_index < count and np.isfinite(open_price[entry_index]):
+            entry = float(open_price[entry_index])
+        elif np.isfinite(close[index]):
+            entry = float(close[index])
+            entry_index = index
+        else:
+            continue
+
+        if entry <= 0:
+            continue
+
+        record = {
+            "폭등일": patterns["유목민 폭등일"].iat[index],
+            "음봉일": patterns["유목민 음봉일"].iat[index],
+            "음봉일수": int(patterns["유목민신호일수"].iat[index]),
+            "거래량배수": float(patterns["유목민 거래량배수"].iat[index]),
+            "급감비율": float(patterns["유목민 급감비율"].iat[index]),
+            "폭등상승률": float(patterns["유목민 폭등상승률"].iat[index]),
+            "진입일": dates[entry_index].strftime("%Y-%m-%d"),
+            "진입가": round(entry, 0),
+        }
+
+        for horizon in horizons:
+            exit_index = index + horizon
+            value = None
+
+            if exit_index < count and np.isfinite(close[exit_index]):
+                value = (close[exit_index] / entry - 1.0) * 100.0
+
+            record[f"수익률{horizon}"] = None if value is None else round(value, 2)
+
+        records.append(record)
+
+    summary = []
+
+    for horizon in horizons:
+        values = [
+            record[f"수익률{horizon}"]
+            for record in records
+            if record[f"수익률{horizon}"] is not None
+        ]
+
+        baseline_values = []
+
+        for index in range(count - horizon - 1):
+            entry = open_price[index + 1]
+            exit_price = close[index + horizon]
+
+            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
+                baseline_values.append(exit_price / entry - 1.0)
+
+        baseline = (
+            sum(1 for value in baseline_values if value > 0) / len(baseline_values) * 100
+            if baseline_values else None
+        )
+
+        if values:
+            series = pd.Series(values)
+            win_rate = float((series > 0).mean() * 100)
+            average = float(series.mean())
+        else:
+            win_rate = average = None
+
+        summary.append({
+            "보유일수": horizon,
+            "표본": len(values),
+            "승률": None if win_rate is None else round(win_rate, 1),
+            "평균": None if average is None else round(average, 2),
+            "중앙값": None if not values else round(float(pd.Series(values).median()), 2),
+            "최선": None if not values else round(float(max(values)), 2),
+            "최악": None if not values else round(float(min(values)), 2),
+            "기준선": None if baseline is None else round(float(baseline), 1),
+            "초과": (
+                None
+                if win_rate is None or baseline is None
+                else round(win_rate - float(baseline), 1)
+            ),
+        })
+
+    return {
+        "신호수": len(records),
+        "기간": empty["기간"],
+        "보유기간": list(horizons),
+        "요약": summary,
+        "신호목록": records,
+    }
+
+
+def add_nomad_signal(df, **kwargs):
+    """유목민 매수 신호(0/1)와 음봉일수를 컬럼으로 추가합니다."""
+    frame = df.copy()
+    patterns = nomad_patterns(frame, **kwargs)
+
+    frame["유목민신호"] = patterns["유목민신호"].astype(int)
+    frame["유목민신호일수"] = patterns["유목민신호일수"].astype(int)
+
+    return frame
 
 
 def detect_nomad_buy(
     df,
     surge_ratio=NOMAD_SURGE_RATIO,
     dry_ratio=NOMAD_DRY_RATIO,
+    recent_days=None,
+    dry_days=NOMAD_DRY_DAYS,
 ):
     """
-    유목민 매수 신호를 마지막 거래일 기준으로 판정합니다.
+    마지막 거래일 기준 유목민 매수 신호를 판정합니다.
 
-    규칙 (마지막 거래일 = T, 그 전 = T-1, T-2)
-        ① T-1: 거래량 >= T-2 거래량 × 2  (거래량 폭등)
-        ② T-1: 종가 > T-2 종가           (폭등 후 상승)
-        ③ T  : 거래량 <= T-1 거래량 × 0.25 (급감)
-        ④ T  : 종가 < 시가                (음봉)
-
-    네 조건이 모두 맞을 때만 매수 후보로 봅니다.
-    값이 없거나 계산할 수 없으면 '유목민 매수'는 False입니다.
+    최근 3거래일 이내에 '전일 대비 거래량 2배 이상 + 상승'이 나오고,
+    그 뒤 1~2일 연속 음봉이면서 거래량이 폭등일의 25% 이하로 줄면
+    매수 신호로 봅니다.
     """
     status = {
         "유목민 매수": False,
         "유목민 폭등일": None,
         "유목민 음봉일": None,
+        "유목민 음봉일수": None,
+        "유목민 음봉일목록": None,
         "유목민 거래량배수": None,
         "유목민 급감비율": None,
         "유목민 폭등상승률": None,
@@ -1158,75 +1448,78 @@ def detect_nomad_buy(
         "유목민 판정": "",
     }
 
-    required = {"시가", "종가", "거래량"}
-
-    if df is None or len(df) < 3 or not required.issubset(df.columns):
+    if df is None or len(df) < 3 or not {"시가", "종가", "거래량"}.issubset(df.columns):
         status["유목민 판정"] = "판정에 필요한 데이터가 부족합니다."
         return status
 
-    today = df.iloc[-1]
-    spike = df.iloc[-2]
-    base = df.iloc[-3]
-
-    def number(row, key):
-        value = row.get(key)
-
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            return None
-
-        return value if np.isfinite(value) else None
-
-    volumes = [number(base, "거래량"), number(spike, "거래량"), number(today, "거래량")]
-    close_base, close_spike, close_today = (
-        number(base, "종가"), number(spike, "종가"), number(today, "종가")
+    patterns = nomad_patterns(
+        df,
+        surge_ratio=surge_ratio,
+        dry_ratio=dry_ratio,
+        recent_days=recent_days,
+        dry_days=dry_days,
     )
-    open_today = number(today, "시가")
 
-    if None in volumes or None in (close_base, close_spike, close_today, open_today):
-        status["유목민 판정"] = "거래량·가격에 결측값이 있습니다."
+    last_row = patterns.iloc[-1]
+
+    if int(last_row["유목민신호"]) == 1:
+        status.update({
+            "유목민 매수": True,
+            "유목민 폭등일": last_row["유목민 폭등일"],
+            "유목민 음봉일": last_row["유목민 음봉일"],
+            "유목민 음봉일수": int(last_row["유목민신호일수"]),
+            "유목민 음봉일목록": last_row["유목민 음봉일목록"],
+            "유목민 거래량배수": float(last_row["유목민 거래량배수"]),
+            "유목민 급감비율": float(last_row["유목민 급감비율"]),
+            "유목민 폭등상승률": float(last_row["유목민 폭등상승률"]),
+            "유목민 음봉등락률": float(last_row["유목민 음봉등락률"]),
+            "유목민 판정": "조건 충족",
+        })
         return status
 
-    if volumes[0] <= 0 or volumes[1] <= 0:
-        status["유목민 판정"] = "비교할 거래량이 0입니다."
-        return status
+    # 불충족 사유: 가장 조건에 가까운 후보(사유가 적은 쪽)를 설명합니다.
+    volume = pd.to_numeric(df["거래량"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    last = len(df) - 1
 
-    surge_multiple = volumes[1] / volumes[0]
-    dry_ratio_value = volumes[2] / volumes[1]
+    def diagnose(days):
+        spike = last - days
+        base = spike - 1
 
-    spike_up = close_spike > close_base
-    today_bear = close_today < open_today
+        if base < 0:
+            return ["비교할 과거 데이터 부족"]
 
-    status.update({
-        "유목민 폭등일": df.index[-2].strftime("%Y-%m-%d"),
-        "유목민 음봉일": df.index[-1].strftime("%Y-%m-%d"),
-        "유목민 거래량배수": round(surge_multiple, 2),
-        "유목민 급감비율": round(dry_ratio_value * 100, 1),
-        "유목민 폭등상승률": round((close_spike / close_base - 1) * 100, 2),
-        "유목민 음봉등락률": round((close_today / close_spike - 1) * 100, 2),
-    })
+        if not np.isfinite(volume[base]) or volume[base] <= 0:
+            return ["거래량 결측"]
 
-    reasons = []
+        reasons = []
 
-    if surge_multiple < surge_ratio:
-        reasons.append(f"거래량 폭등 미달({surge_multiple:.2f}배)")
+        if volume[spike] < volume[base] * surge_ratio:
+            reasons.append(f"거래량 폭등 미달({volume[spike] / volume[base]:.2f}배)")
 
-    if not spike_up:
-        reasons.append("폭등일 상승 아님")
+        if close[spike] <= close[base]:
+            reasons.append("폭등일 상승 아님")
 
-    if dry_ratio_value > dry_ratio:
-        reasons.append(f"다음날 급감 미달({dry_ratio_value * 100:.1f}%)")
+        dry_slice = range(spike + 1, last + 1)
+        bearish = all(
+            np.isfinite(open_price[j]) and close[j] < open_price[j]
+            for j in dry_slice
+        )
 
-    if not today_bear:
-        reasons.append("음봉 아님")
+        if not bearish:
+            reasons.append("음봉 아님")
 
-    status["유목민 매수"] = not reasons
-    status["유목민 판정"] = (
-        "조건 충족"
-        if not reasons
-        else " / ".join(reasons)
-    )
+        worst = max(volume[j] for j in dry_slice) / volume[spike] * 100
+
+        if worst > dry_ratio * 100:
+            reasons.append(f"거래량 급감 미달({worst:.1f}%)")
+
+        return reasons
+
+    best = min((diagnose(days) for days in dry_days), key=len)
+
+    status["유목민 판정"] = " / ".join(best) if best else "조건 충족"
 
     return status
 
@@ -1292,6 +1585,7 @@ def analyze_frame(
     df = TechnicalIndicator.add_monthly_macd(df)
 
     df = SignalGenerator.add_signals(df)
+    df = add_nomad_signal(df)
 
     # -----------------------------------------------------
     # 백테스트
@@ -1417,10 +1711,14 @@ def analyze_frame(
     # 유목민 매수(거래량 폭등 → 급감 음봉) 판정
     latest_status.update(detect_nomad_buy(df))
 
+    # 과거 신호의 5·10·20거래일 성과
+    nomad_stats = nomad_signal_stats(df)
+
     return {
         "data": df,
         "metrics": pd.DataFrame(metrics),
         "trades": trades,
         "latest": latest_status,
+        "nomad_stats": nomad_stats,
         "messages": messages,
     }

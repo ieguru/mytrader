@@ -1140,6 +1140,123 @@ def render_nomad_buy_table(results):
     )
 
 
+def render_nomad_stats(results):
+    """유목민 신호 이후 5·10·20거래일 승률과 평균 수익률을 요약합니다."""
+    stats = [
+        (result["stock_name"], result.get("nomad_stats") or {})
+        for result in results
+    ]
+    stats = [(name, data) for name, data in stats if data.get("신호수")]
+
+    if not stats:
+        return
+
+    horizons = stats[0][1].get("보유기간") or [5, 10, 20]
+
+    def rate(value):
+        return "-" if value is None else f"{value:.0f}%"
+
+    def pct(value):
+        return "-" if value is None else f"{value:+.1f}%"
+
+    rows = []
+    pooled = {horizon: [] for horizon in horizons}
+
+    for name, data in stats:
+        summary = {
+            item["보유일수"]: item for item in data.get("요약", [])
+        }
+
+        row = {"종목": name, "신호수": data.get("신호수", 0)}
+
+        for horizon in horizons:
+            item = summary.get(horizon, {})
+            row[f"{horizon}일 승률"] = rate(item.get("승률"))
+            row[f"{horizon}일 평균"] = pct(item.get("평균"))
+
+        rows.append(row)
+
+        for record in data.get("신호목록", []):
+            for horizon in horizons:
+                value = record.get(f"수익률{horizon}")
+
+                if value is not None:
+                    pooled[horizon].append(value)
+
+    if len(stats) > 1:
+        row = {
+            "종목": f"전체 {len(stats)}종목",
+            "신호수": sum(data.get("신호수", 0) for _, data in stats),
+        }
+
+        for horizon in horizons:
+            values = pooled[horizon]
+            wins = sum(1 for value in values if value > 0)
+            row[f"{horizon}일 승률"] = rate(
+                wins / len(values) * 100 if values else None
+            )
+            row[f"{horizon}일 평균"] = pct(
+                sum(values) / len(values) if values else None
+            )
+
+        rows.append(row)
+
+    st.markdown("#### 🐪 유목민 신호 성과 검증")
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    baselines = []
+
+    for horizon in horizons:
+        values = [
+            {item["보유일수"]: item for item in data.get("요약", [])}
+            .get(horizon, {})
+            .get("기준선")
+            for _, data in stats
+        ]
+        values = [value for value in values if value is not None]
+
+        if values:
+            baselines.append(f"{horizon}일 {sum(values) / len(values):.1f}%")
+
+    st.caption(
+        "진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가 기준입니다. "
+        "기준선은 같은 규칙으로 전 구간 아무 날에나 진입했을 때의 상승 비율"
+        "(종목 평균)이며, 승률이 기준선을 넘지 못하면 신호에 우위가 없다는 뜻입니다."
+        + (f" · 기준선: {' / '.join(baselines)}" if baselines else "")
+    )
+
+    detail = []
+
+    for name, data in stats:
+        for record in data.get("신호목록", []):
+            detail.append({
+                "종목": name,
+                "폭등일": record.get("폭등일"),
+                "음봉일": record.get("음봉일"),
+                "음봉일수": record.get("음봉일수"),
+                "거래량배수": record.get("거래량배수"),
+                "급감비율(%)": record.get("급감비율"),
+                "진입일": record.get("진입일"),
+                "진입가": record.get("진입가"),
+                **{
+                    f"{horizon}일(%)": record.get(f"수익률{horizon}")
+                    for horizon in horizons
+                },
+            })
+
+    if detail:
+        with st.expander(f"신호별 상세 ({len(detail)}건)", expanded=False):
+            st.dataframe(
+                pd.DataFrame(detail),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+
 def render_results_overview(results):
     """종목명·신호 클릭 시 해당 종목 상세분석으로 이동."""
     if not results:
@@ -1304,6 +1421,8 @@ def render_results_overview(results):
 
     # 요약표 바로 아래에 유목민 매수 종목을 붙입니다.
     render_nomad_buy_table(results)
+
+    render_nomad_stats(results)
 
     st.divider()
 
@@ -2344,6 +2463,7 @@ def run_batch(
                         analysis.get("messages") or []
                     )
                 ),
+                "nomad_stats": analysis.get("nomad_stats") or {},
                 "png_bytes": None,
                 "image_filename": None,
             }
