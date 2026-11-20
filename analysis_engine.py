@@ -1130,6 +1130,8 @@ NOMAD_SURGE_RATIO = 2.0    # 거래량 폭등: 전일 대비 2배 이상
 NOMAD_DRY_RATIO = 0.25     # 거래량 급감: 폭등일 거래량의 25% 이하
 NOMAD_RECENT_DAYS = 3      # 폭등일은 마지막 거래일 기준 최근 3거래일 이내
 NOMAD_DRY_DAYS = (1, 2)    # 폭등일 이후 1~2일 연속 음봉
+NOMAD_CHART_MONTHS = 18    # charts.DISPLAY_MONTHS와 같아야 합니다(차트 표시 구간)
+NOMAD_RECENT_WINDOW = 7    # 전체 결과 요약에서 '최근 신호'로 볼 기간(달력일)
 
 
 def nomad_patterns(
@@ -1265,6 +1267,53 @@ def nomad_patterns(
     return frame
 
 
+def recent_nomad_signal(df, days=NOMAD_RECENT_WINDOW):
+    """
+    최근 days일(달력일) 안에 발생한 마지막 유목민 매수 신호를 돌려줍니다.
+
+    전체 결과 요약의 '유목민 신호' 열에서 사용합니다.
+    신호가 없거나 데이터가 모자라면 신호 없음입니다.
+    """
+    result = {
+        "신호": "신호 없음",
+        "발생일": None,
+        "음봉일수": None,
+        "경과일": None,
+        "거래량배수": None,
+        "급감비율": None,
+    }
+
+    if df is None or df.empty or not {"시가", "종가", "거래량"}.issubset(df.columns):
+        return result
+
+    patterns = nomad_patterns(df)
+
+    if patterns.empty:
+        return result
+
+    dates = pd.to_datetime(df.index)
+    reference = dates[-1]
+    cutoff = reference - pd.Timedelta(days=days - 1)
+    flags = patterns["유목민신호"].to_numpy(dtype=int) == 1
+    hits = [index for index in np.flatnonzero(flags) if dates[index] >= cutoff]
+
+    if not hits:
+        return result
+
+    index = hits[-1]
+
+    result.update({
+        "신호": "매수",
+        "발생일": dates[index].strftime("%Y-%m-%d"),
+        "음봉일수": int(patterns["유목민신호일수"].iat[index]),
+        "경과일": int((reference - dates[index]).days),
+        "거래량배수": float(patterns["유목민 거래량배수"].iat[index]),
+        "급감비율": float(patterns["유목민 급감비율"].iat[index]),
+    })
+
+    return result
+
+
 def pattern_index(patterns):
     """nomad_patterns 결과에서 신호가 1인 위치(bool 배열)를 돌려줍니다."""
     return patterns["유목민신호"].to_numpy(dtype=int) == 1
@@ -1279,6 +1328,7 @@ def nomad_signal_stats(
     surge_ratio=NOMAD_SURGE_RATIO,
     dry_ratio=NOMAD_DRY_RATIO,
     dry_days=NOMAD_DRY_DAYS,
+    chart_months=NOMAD_CHART_MONTHS,
 ):
     """
     과거 유목민 매수 신호가 난 뒤 5·10·20거래일 수익률을 집계합니다.
@@ -1290,6 +1340,9 @@ def nomad_signal_stats(
     """
     empty = {
         "신호수": 0,
+        "차트신호수": 0,
+        "차트개월": chart_months,
+        "차트시작일": None,
         "기간": None,
         "보유기간": list(horizons),
         "요약": [],
@@ -1315,6 +1368,11 @@ def nomad_signal_stats(
         dates[0].strftime("%Y-%m-%d"),
         dates[-1].strftime("%Y-%m-%d"),
     ]
+
+    # 차트는 최근 chart_months개월만 그립니다. 별표와 숫자를 맞추기 위해
+    # 차트 표시 구간 안의 신호 수를 따로 셉니다.
+    chart_start = dates[-1] - pd.DateOffset(months=chart_months)
+    empty["차트시작일"] = chart_start.strftime("%Y-%m-%d")
 
     signal_index = np.flatnonzero(pattern_index(patterns))
     records = []
@@ -1342,6 +1400,7 @@ def nomad_signal_stats(
             "폭등상승률": float(patterns["유목민 폭등상승률"].iat[index]),
             "진입일": dates[entry_index].strftime("%Y-%m-%d"),
             "진입가": round(entry, 0),
+            "차트표시": bool(dates[index] >= chart_start),
         }
 
         for horizon in horizons:
@@ -1403,6 +1462,9 @@ def nomad_signal_stats(
 
     return {
         "신호수": len(records),
+        "차트신호수": sum(1 for record in records if record["차트표시"]),
+        "차트개월": chart_months,
+        "차트시작일": empty["차트시작일"],
         "기간": empty["기간"],
         "보유기간": list(horizons),
         "요약": summary,
@@ -1654,10 +1716,12 @@ def analyze_frame(
 
     # 전일 종가와 전일대비 등락률
     previous_close = None
+    previous_close_date = None
     change_pct = None
 
     if len(df) >= 2:
         previous_close = float(df["종가"].iloc[-2])
+        previous_close_date = df.index[-2].strftime("%Y-%m-%d")
 
         if previous_close:
             change_pct = (
@@ -1669,6 +1733,7 @@ def analyze_frame(
         "기준일": reference_date.strftime("%Y-%m-%d"),
         "종가": float(latest_row["종가"]),
         "전일 종가": previous_close,
+        "전일 종가일": previous_close_date,
         "전일대비(%)": (
             round(change_pct, 2)
             if change_pct is not None
@@ -1710,6 +1775,14 @@ def analyze_frame(
 
     # 유목민 매수(거래량 폭등 → 급감 음봉) 판정
     latest_status.update(detect_nomad_buy(df))
+
+    # 최근 7일 이내 유목민 신호 (전체 결과 요약용)
+    recent_nomad = recent_nomad_signal(df)
+
+    latest_status["유목민 신호"] = recent_nomad["신호"]
+    latest_status["유목민 신호일"] = recent_nomad["발생일"]
+    latest_status["유목민 신호 음봉일수"] = recent_nomad["음봉일수"]
+    latest_status["유목민 신호 경과일"] = recent_nomad["경과일"]
 
     # 과거 신호의 5·10·20거래일 성과
     nomad_stats = nomad_signal_stats(df)

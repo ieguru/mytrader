@@ -282,6 +282,14 @@ st.markdown(
     .price-delta.up   { color:#dc2626; }   /* 상승: 빨강 */
     .price-delta.down { color:#2563eb; }   /* 하락: 파랑 */
     .price-delta.flat { color:var(--faint); }
+    .price-label { display:flex; align-items:center; gap:7px; }
+    .price-basis {
+        font-size:.7rem; font-weight:800; letter-spacing:-.01em;
+        border-radius:999px; padding:2px 8px; white-space:nowrap;
+    }
+    .price-basis.is-live { color:#92400e; background:#fef3c7; border:1px solid #fde68a; }
+    .price-basis.is-stale { color:#9a3412; background:#ffedd5; border:1px solid #fed7aa; }
+    .price-basis.is-fresh { color:#166534; background:#dcfce7; border:1px solid #bbf7d0; }
 
     /* ---------- 일간/주간/월간 추세 신호등 ---------- */
     .trend-card {
@@ -401,6 +409,9 @@ OUTPUT_DIR = BASE_DIR / "output"
 LAST_RESULT_FILE = OUTPUT_DIR / "last_analysis.json.gz"
 
 TODAY_KST = datetime.now(ZoneInfo("Asia/Seoul")).date()
+
+# 국내 정규장 마감 시각. 이 시각 전에 조회한 당일 값은 확정 종가가 아닙니다.
+MARKET_CLOSE_TIME = datetime.strptime("15:30", "%H:%M").time()
 
 # 기준일 포함 최근 7일: 거래일이 아닌 달력일입니다.
 RECENT_SIGNAL_DAYS = 7
@@ -1020,15 +1031,80 @@ def render_page_heading(title, saved_at, source):
     )
 
 
+def price_basis_state(latest, now=None):
+    """
+    '최근 종가' 값이 어느 시점 가격인지 판정합니다.
+
+    스냅샷은 마지막 분석 시점의 값이므로, 그 값이 확정 종가인지
+    장중 가격인지(또는 며칠 전 종가인지)를 화면에 밝혀야 합니다.
+    """
+    now = now or datetime.now(ZoneInfo("Asia/Seoul"))
+    basis = normalize_date(latest.get("기준일"))
+
+    state = {
+        "label": "최근 종가",
+        "badge": "",
+        "css": "",
+        "title": "전일 종가 대비 등락률",
+    }
+
+    if pd.isna(basis):
+        state["badge"] = "기준일 없음"
+        state["css"] = "is-stale"
+        return state
+
+    basis_date = basis.date()
+    days = (now.date() - basis_date).days
+
+    if days < 0:
+        days = 0
+
+    previous_date = latest.get("전일 종가일")
+    previous_text = (
+        f"전일({previous_date}) 종가 대비"
+        if previous_date
+        else "전일 종가 대비"
+    )
+
+    if days == 0 and now.time() < MARKET_CLOSE_TIME:
+        state.update({
+            "label": "현재가",
+            "badge": "장중 · 확정 전",
+            "css": "is-live",
+            "title": f"장중 가격입니다(확정 종가 아님). {previous_text}",
+        })
+        return state
+
+    if days == 0:
+        state.update({
+            "badge": "당일 종가",
+            "css": "is-fresh",
+            "title": f"{basis_date:%Y-%m-%d} 종가 · {previous_text}",
+        })
+        return state
+
+    state.update({
+        "badge": f"{days}일 전 종가",
+        "css": "is-stale",
+        "title": (
+            f"분석 시점이 {basis_date:%Y-%m-%d}이라 그날 종가를 표시합니다. "
+            f"{previous_text}"
+        ),
+    })
+
+    return state
+
+
 def render_price_card(latest):
     """
     최근 종가 카드 — 값과 전일대비 등락률을 함께 표시합니다.
 
+    값이 언제 기준인지(당일 종가 / 장중 / N일 전)를 함께 보여줍니다.
     상승은 빨강, 하락은 파랑(국내 증시 표기와 동일).
-    값이 없으면 회색 '—'로 표시해, 계산 불가를 숨기지 않습니다.
     """
     close_price = to_finite_number(latest.get("종가"))
     change = to_finite_number(latest.get("전일대비(%)"))
+    basis = price_basis_state(latest)
 
     value_text = (
         f"{close_price:,.0f}원" if close_price is not None else "—"
@@ -1042,14 +1118,19 @@ def render_price_card(latest):
         arrow = "▲" if state == "up" else ("▼" if state == "down" else "")
         delta_text = f"{arrow} {abs(change):.2f}%"
 
-    title = "전일 종가 대비 등락률"
+    badge_html = (
+        f'<span class="price-basis {basis["css"]}">'
+        f'{escape(basis["badge"])}</span>'
+        if basis["badge"] else ""
+    )
 
     st.markdown(
         '<div class="price-card">'
-        '<div class="price-label">최근 종가</div>'
+        f'<div class="price-label">{escape(basis["label"])}'
+        f'{badge_html}</div>'
         '<div class="price-row">'
         f'<span class="price-value">{value_text}</span>'
-        f'<span class="price-delta {state}" title="{title}">'
+        f'<span class="price-delta {state}" title="{escape(basis["title"])}">'
         f"{delta_text}</span>"
         "</div></div>",
         unsafe_allow_html=True,
