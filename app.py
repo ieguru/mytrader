@@ -1023,6 +1023,116 @@ def trend_lights_cell(latest):
     return '<span class="ov-trends">' + "".join(parts) + "</span>"
 
 
+def render_nomad_buy_table(results):
+    """
+    '유목민 매수 종목' 표를 그립니다.
+
+    조건: 전일 대비 거래량 2배 이상 + 상승 -> 다음날 거래량 25% 이하 + 음봉
+    조건을 충족한 종목이 없으면 아무것도 그리지 않습니다.
+    """
+    rows = []
+
+    for position, result in enumerate(results, start=1):
+        latest = result.get("latest") or {}
+
+        if not latest.get("유목민 매수"):
+            continue
+
+        name = escape(str(result["stock_name"]))
+        ticker = escape(str(result["ticker"]))
+        anchor = f"stock-detail-{position}"
+
+        multiple = to_finite_number(latest.get("유목민 거래량배수"))
+        dry = to_finite_number(latest.get("유목민 급감비율"))
+        change = to_finite_number(latest.get("유목민 음봉등락률"))
+        close_price = to_finite_number(latest.get("종가"))
+        per_value = to_finite_number(latest.get("PER"))
+
+        state = price_delta_state(change)
+        arrow = "▲" if state == "up" else ("▼" if state == "down" else "")
+        change_text = "-" if change is None else f"{arrow} {abs(change):.2f}%"
+
+        def fmt_cell(value, spec, suffix=""):
+            return f"{value:{spec}}{suffix}" if value is not None else "-"
+
+        surge_day = escape(str(latest.get("유목민 폭등일") or "-"))
+        dry_day = escape(str(latest.get("유목민 음봉일") or "-"))
+
+        rows.append(
+            "<tr>"
+            f'<td><a href="#{anchor}" target="_self" '
+            'style="font-weight:700;color:inherit;text-decoration:none;">'
+            f"{name} "
+            '<span style="color:#808080;font-size:12px;font-weight:400;">'
+            f"({ticker})</span></a></td>"
+            f"<td>{surge_day}</td>"
+            f'<td class="num">{fmt_cell(multiple, ",.2f", "배")}</td>'
+            f"<td>{dry_day}</td>"
+            f'<td class="num">{fmt_cell(dry, ",.1f", "%")}</td>'
+            f'<td class="num price-delta {state}">{change_text}</td>'
+            f'<td class="num">{fmt_cell(close_price, ",.0f", "원")}</td>'
+            f'<td class="num">{fmt_cell(per_value, ",.1f")}</td>'
+            "</tr>"
+        )
+
+    if not rows:
+        return
+
+    css = (
+        ".nomad-wrap { margin:4px 0 2px; }"
+        ".nomad-head { display:flex; align-items:center; gap:10px; margin-bottom:6px; }"
+        ".nomad-head .nomad-title { font-weight:800; font-size:1.05rem;"
+        " color:#0f172a; letter-spacing:-.018em; }"
+        ".nomad-head .nomad-count { font-size:.78rem; font-weight:800;"
+        " color:#92400e; background:#fef3c7; border:1px solid #fde68a;"
+        " border-radius:999px; padding:3px 10px; }"
+        ".nomad-rule { font-size:.8rem; color:#64748b; margin:0 0 10px 2px; }"
+        ".nomad-table { width:100%; border-collapse:separate; border-spacing:0;"
+        " font-size:14px; background:#fff; border:1px solid #fde68a;"
+        " border-radius:14px; overflow:hidden;"
+        " box-shadow:0 2px 10px rgba(180,83,9,.10); }"
+        ".nomad-table th { padding:11px 16px; text-align:left; white-space:nowrap;"
+        " font-weight:700; color:#92400e; font-size:12px; letter-spacing:.03em;"
+        " background:#fffbeb; border-bottom:1px solid #fde68a; }"
+        ".nomad-table td { padding:11px 16px; border-bottom:1px solid #fffbeb;"
+        " vertical-align:middle; }"
+        ".nomad-table tbody tr:last-child td { border-bottom:none; }"
+        ".nomad-table tbody tr:hover { background:#fffdf5; }"
+        ".nomad-table .num { text-align:right; font-variant-numeric:tabular-nums; }"
+        ".nomad-table th.num { text-align:right; }"
+        ".nomad-table .price-delta { font-weight:800; }"
+        ".nomad-table .price-delta.up { color:#dc2626; }"
+        ".nomad-table .price-delta.down { color:#2563eb; }"
+        ".nomad-table .price-delta.flat { color:#475569; }"
+    )
+
+    head = (
+        '<div class="nomad-wrap">'
+        '<div class="nomad-head">'
+        '<span class="nomad-title">🐪 유목민 매수 종목</span>'
+        f'<span class="nomad-count">{len(rows)}종목</span>'
+        "</div>"
+        '<div class="nomad-rule">'
+        "전일 대비 거래량 2배 이상 + 상승 &rarr; 다음날 거래량 25% 이하 + 음봉"
+        "</div>"
+        '<div style="overflow-x:auto;">'
+        '<table class="nomad-table"><thead><tr>'
+        "<th>종목</th><th>폭등일</th>"
+        '<th class="num">거래량 배수</th>'
+        "<th>음봉일</th>"
+        '<th class="num">급감 비율</th>'
+        '<th class="num">음봉 등락률</th>'
+        '<th class="num">종가</th>'
+        '<th class="num">PER</th>'
+        "</tr></thead><tbody>"
+    )
+
+    st.markdown(
+        "<style>" + css + "</style>" + head + "".join(rows) + "</tbody></table></div></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_results_overview(results):
     """종목명·신호 클릭 시 해당 종목 상세분석으로 이동."""
     if not results:
@@ -1184,6 +1294,9 @@ def render_results_overview(results):
         html,
         unsafe_allow_html=True,
     )
+
+    # 요약표 바로 아래에 유목민 매수 종목을 붙입니다.
+    render_nomad_buy_table(results)
 
     st.divider()
 
@@ -2083,6 +2196,7 @@ def run_batch(
     overview_container,
     progress_container,
     results_container,
+    nomad_container=None,
 ):
     results = []
     records = []
@@ -2129,23 +2243,12 @@ def run_batch(
             / f"{stock_name}.xlsx"
         )
 
-        if not excel_path.is_file():
-            records.append({
-                "종목명": stock_name,
-                "종목코드": ticker,
-                "상태": "건너뜀",
-                "내용": (
-                    "재무 파일 없음: "
-                    f"file/{stock_name}.xlsx"
-                ),
-            })
+        # 재무 엑셀이 없는 종목도 분석합니다.
+        # (배치와 같은 규칙: 목표가·괴리율·PER만 비우고 신호·차트는 정상 산출)
+        excel_missing = not excel_path.is_file()
 
-            st.session_state["batch_records"] = records
-
-            progress.progress(
-                index / total
-            )
-            continue
+        if excel_missing:
+            excel_path = None
 
         # -------------------------------------------------
         # 데이터 조회 및 분석
@@ -2163,7 +2266,7 @@ def run_batch(
             analysis = analyze_frame(
                 frame,
                 stock_name,
-                excel_file=str(excel_path),
+                excel_file=(str(excel_path) if excel_path else None),
             )
 
             # 엔진 내부 기본값과 관계없이
@@ -2174,13 +2277,29 @@ def run_batch(
             )
 
             # PER은 원본 엑셀에서 별도로 읽습니다.
-            latest.update(
-                build_per_status(
-                    excel_path=excel_path,
-                    stock_name=stock_name,
-                    latest=latest,
+            if excel_path is None:
+                latest.update(per_status.empty_per_status())
+                latest["PER 설명"] = (
+                    f"file/{stock_name}.xlsx 가 없어 "
+                    "PER을 계산하지 않았습니다."
                 )
-            )
+            else:
+                latest.update(
+                    build_per_status(
+                        excel_path=excel_path,
+                        stock_name=stock_name,
+                        latest=latest,
+                    )
+                )
+
+            if excel_missing:
+                messages_note = (
+                    f"file/{stock_name}.xlsx 가 없어 "
+                    "목표가·괴리율·PER 없이 분석했습니다."
+                )
+                analysis.setdefault("messages", [])
+                if messages_note not in analysis["messages"]:
+                    analysis["messages"].append(messages_note)
 
             # recent_signals는 기존 함수와 동일하게
             # 날짜 오름차순 반환을 전제로 역순 표시합니다.
@@ -2247,7 +2366,7 @@ def run_batch(
             png_bytes = make_chart_png(
                 analysis["data"],
                 stock_name,
-                excel_file=str(excel_path),
+                excel_file=(str(excel_path) if excel_path else None),
             )
 
             image_path, saved_png = save_chart_png(
@@ -2371,23 +2490,36 @@ def run_batch(
     )
 
     if results:
-        try:
-            save_last_analysis(
-                results=results,
-                records=records,
-                period=(
-                    start.isoformat(),
-                    end.isoformat(),
-                ),
-                complete=True,
-            )
+        # save_last_analysis는 예외를 흡수하고 False를 돌려줍니다.
+        # 반환값을 확인해야 실패를 화면에 알릴 수 있습니다.
+        saved_ok = save_last_analysis(
+            results=results,
+            records=records,
+            period=(
+                start.isoformat(),
+                end.isoformat(),
+            ),
+            complete=True,
+        )
 
-        except Exception as error:
+        if not saved_ok:
             with progress_container:
-                st.warning(
-                    "분석은 완료했으나 결과 저장에 "
-                    f"실패했습니다: {error}"
+                st.error(
+                    "분석은 완료했지만 결과 저장에 실패했습니다. "
+                    f"({st.session_state.get('save_error') or '원인 미상'})"
                 )
+                st.caption(
+                    f"저장소: {RESULT_STORE.describe()} · "
+                    "사이드바 '마지막 결과 보관·복원'의 "
+                    "'저장 진단'으로 원인을 확인할 수 있습니다."
+                )
+
+    else:
+        with progress_container:
+            st.warning(
+                "저장할 분석 결과가 없습니다. "
+                "실행한 종목이 모두 실패했는지 확인하세요."
+            )
 
 
 # =========================================================
@@ -2680,6 +2812,62 @@ with st.sidebar:
                     f"{error}"
                 )
 
+        # 2-1) 저장 진단: 실제로 쓰고 읽어 확인합니다.
+        if st.button(
+            "저장 진단",
+            key="diagnose_store",
+            use_container_width=True,
+            help="테스트 결과를 저장한 뒤 즉시 읽어, 저장소 권한·경로를 확인합니다.",
+        ):
+            try:
+                probe_payload = result_store.build_snapshot(
+                    results=[{
+                        "stock_name": "저장진단",
+                        "ticker": "000000",
+                        "latest": {"종목명": "저장진단", "기준일": "2026-01-01",
+                                   "종가": 1.0, "PER": None, "PER 분기": None,
+                                   "Weekly 신호": "신호 없음",
+                                   "Weekly+Monthly 신호": "신호 없음",
+                                   "Weekly 신호일": None,
+                                   "Weekly+Monthly 신호일": None,
+                                   "신호 조회 일수": RECENT_SIGNAL_DAYS},
+                        "messages": [],
+                        "image_filename": None,
+                        "png_bytes": None,
+                        "weekly_signals": pd.DataFrame(),
+                        "combined_signals": pd.DataFrame(),
+                        "metrics": pd.DataFrame(),
+                        "trades": {},
+                    }],
+                    records=[],
+                    period=("2026-01-01", "2026-01-01"),
+                    complete=False,
+                    meta={
+                        "recent_signal_days": RECENT_SIGNAL_DAYS,
+                        "recent_signal_limit": RECENT_SIGNAL_LIMIT,
+                    },
+                    source="app",
+                )
+
+                RESULT_STORE.save(probe_payload)
+                back = RESULT_STORE.load()
+                version = (back or {}).get("version")
+
+                st.success(
+                    "저장소 정상 — 쓰기·읽기 모두 성공 "
+                    f"(v{version}, {RESULT_STORE.describe()})"
+                )
+
+            except Exception as error:
+                st.error(
+                    f"저장 실패: {type(error).__name__}: {error}"
+                )
+                st.caption(
+                    "backend=github 설정이면 결과는 배치가 커밋하며 "
+                    "앱은 로컬에만 씁니다. "
+                    "http 설정이면 URL이 PUT을 허용하는지 확인하세요."
+                )
+
         # 3) 저장소에서 다시 읽기
         if st.button(
             "저장된 결과 다시 불러오기",
@@ -2715,6 +2903,7 @@ if restore_notice:
 
 # 가장 위에 전체 결과 요약표 위치를 확보합니다.
 overview_container = st.empty()
+nomad_container = st.empty()
 progress_container = st.container()
 summary_container = st.container()
 results_container = st.container()
@@ -2743,6 +2932,7 @@ if submitted:
             overview_container=overview_container,
             progress_container=progress_container,
             results_container=results_container,
+            nomad_container=nomad_container,
         )
 
 records = st.session_state.get(

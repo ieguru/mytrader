@@ -1126,6 +1126,111 @@ def trend_flag(row, column):
     return int(np.sign(number))
 
 
+NOMAD_SURGE_RATIO = 2.0    # 거래량 폭등: 전일의 2배 이상
+NOMAD_DRY_RATIO = 0.25     # 다음날 급감: 폭등일의 25% 이하
+
+
+def detect_nomad_buy(
+    df,
+    surge_ratio=NOMAD_SURGE_RATIO,
+    dry_ratio=NOMAD_DRY_RATIO,
+):
+    """
+    유목민 매수 신호를 마지막 거래일 기준으로 판정합니다.
+
+    규칙 (마지막 거래일 = T, 그 전 = T-1, T-2)
+        ① T-1: 거래량 >= T-2 거래량 × 2  (거래량 폭등)
+        ② T-1: 종가 > T-2 종가           (폭등 후 상승)
+        ③ T  : 거래량 <= T-1 거래량 × 0.25 (급감)
+        ④ T  : 종가 < 시가                (음봉)
+
+    네 조건이 모두 맞을 때만 매수 후보로 봅니다.
+    값이 없거나 계산할 수 없으면 '유목민 매수'는 False입니다.
+    """
+    status = {
+        "유목민 매수": False,
+        "유목민 폭등일": None,
+        "유목민 음봉일": None,
+        "유목민 거래량배수": None,
+        "유목민 급감비율": None,
+        "유목민 폭등상승률": None,
+        "유목민 음봉등락률": None,
+        "유목민 판정": "",
+    }
+
+    required = {"시가", "종가", "거래량"}
+
+    if df is None or len(df) < 3 or not required.issubset(df.columns):
+        status["유목민 판정"] = "판정에 필요한 데이터가 부족합니다."
+        return status
+
+    today = df.iloc[-1]
+    spike = df.iloc[-2]
+    base = df.iloc[-3]
+
+    def number(row, key):
+        value = row.get(key)
+
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        return value if np.isfinite(value) else None
+
+    volumes = [number(base, "거래량"), number(spike, "거래량"), number(today, "거래량")]
+    close_base, close_spike, close_today = (
+        number(base, "종가"), number(spike, "종가"), number(today, "종가")
+    )
+    open_today = number(today, "시가")
+
+    if None in volumes or None in (close_base, close_spike, close_today, open_today):
+        status["유목민 판정"] = "거래량·가격에 결측값이 있습니다."
+        return status
+
+    if volumes[0] <= 0 or volumes[1] <= 0:
+        status["유목민 판정"] = "비교할 거래량이 0입니다."
+        return status
+
+    surge_multiple = volumes[1] / volumes[0]
+    dry_ratio_value = volumes[2] / volumes[1]
+
+    spike_up = close_spike > close_base
+    today_bear = close_today < open_today
+
+    status.update({
+        "유목민 폭등일": df.index[-2].strftime("%Y-%m-%d"),
+        "유목민 음봉일": df.index[-1].strftime("%Y-%m-%d"),
+        "유목민 거래량배수": round(surge_multiple, 2),
+        "유목민 급감비율": round(dry_ratio_value * 100, 1),
+        "유목민 폭등상승률": round((close_spike / close_base - 1) * 100, 2),
+        "유목민 음봉등락률": round((close_today / close_spike - 1) * 100, 2),
+    })
+
+    reasons = []
+
+    if surge_multiple < surge_ratio:
+        reasons.append(f"거래량 폭등 미달({surge_multiple:.2f}배)")
+
+    if not spike_up:
+        reasons.append("폭등일 상승 아님")
+
+    if dry_ratio_value > dry_ratio:
+        reasons.append(f"다음날 급감 미달({dry_ratio_value * 100:.1f}%)")
+
+    if not today_bear:
+        reasons.append("음봉 아님")
+
+    status["유목민 매수"] = not reasons
+    status["유목민 판정"] = (
+        "조건 충족"
+        if not reasons
+        else " / ".join(reasons)
+    )
+
+    return status
+
+
 def analyze_frame(
     frame,
     stock_name,
@@ -1308,6 +1413,9 @@ def analyze_frame(
         "Weekly_Trend": trend_flag(latest_row, "Weekly_Trend"),
         "Monthly_Trend": trend_flag(latest_row, "Monthly_Trend"),
     }
+
+    # 유목민 매수(거래량 폭등 → 급감 음봉) 판정
+    latest_status.update(detect_nomad_buy(df))
 
     return {
         "data": df,
