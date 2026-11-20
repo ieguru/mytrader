@@ -241,6 +241,19 @@ st.markdown(
         font-size:.88rem; font-weight:700; letter-spacing:-0.01em;
     }
 
+    /* ---------- 페이지 제목 + 실행 시각 ---------- */
+    .page-heading h1 {
+        display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    }
+    .page-heading .heading-time {
+        font-size:.8rem; font-weight:700; letter-spacing:-.01em;
+        color:var(--muted); background:#eef2ff;
+        border:1px solid #e0e7ff; border-radius:999px;
+        padding:5px 12px; line-height:1.2; white-space:nowrap;
+    }
+    .page-heading .heading-time.is-batch { color:#3730a3; background:#eef2ff; }
+    .page-heading .heading-time.is-none { color:var(--faint); background:#f8fafc; border-color:var(--line); }
+
     /* ---------- 최근 종가 카드(등락률 색상 포함) ---------- */
     .price-card {
         position:relative; background:var(--surface);
@@ -895,6 +908,61 @@ def price_delta_state(value):
         return "down"
 
     return "flat"
+
+
+def format_run_stamp(value):
+    """
+    스냅샷 saved_at(ISO)을 '2026-11-20(금) 20:05' 형태로 바꿉니다.
+
+    파싱에 실패하면 원본 문자열을 그대로 돌려줍니다(정보를 숨기지 않음).
+    """
+    if not value:
+        return None
+
+    text = str(value).strip()
+
+    try:
+        moment = datetime.fromisoformat(text)
+
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+
+        moment = moment.astimezone(ZoneInfo("Asia/Seoul"))
+        weekday = WEEKDAYS[moment.weekday()]
+
+        return f"{moment:%Y-%m-%d}({weekday}) {moment:%H:%M}"
+
+    except ValueError:
+        return text
+
+
+def render_page_heading(title, saved_at, source):
+    """
+    제목 옆에 마지막 분석 실행 날짜·시간을 붙입니다.
+
+    source가 'batch'면 예약 실행, 그 외는 앱에서 직접 실행한 결과입니다.
+    실행 기록이 없으면 배지를 붙이지 않습니다(잘못된 시각을 보여주지 않기 위해).
+    """
+    stamp = format_run_stamp(saved_at)
+
+    if not stamp:
+        st.markdown(
+            f'<div class="page-heading"><h1>{escape(title)} '
+            '<span class="heading-time is-none">실행 기록 없음</span>'
+            "</h1></div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    label = "자동 실행" if str(source) == "batch" else "직접 실행"
+    css = "is-batch" if str(source) == "batch" else ""
+
+    st.markdown(
+        f'<div class="page-heading"><h1>{escape(title)}'
+        f'<span class="heading-time {css}">{escape(stamp)} '
+        f"· {label}</span></h1></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_price_card(latest):
@@ -2631,7 +2699,11 @@ with st.sidebar:
 # 오른쪽: 분석 실행 및 결과
 # =========================================================
 
-st.title("종목별 분석 결과")
+render_page_heading(
+    "종목별 분석 결과",
+    st.session_state.get("last_saved_at"),
+    st.session_state.get("result_source"),
+)
 
 restore_notice = st.session_state.pop(
     "restore_notice",
