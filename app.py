@@ -1043,6 +1043,11 @@ def render_nomad_buy_table(results):
         anchor = f"stock-detail-{position}"
 
         multiple = to_finite_number(latest.get("유목민 거래량배수"))
+        bear_days = to_finite_number(latest.get("유목민 음봉일수"))
+
+        # 이전 스냅샷은 음봉일수 키가 없습니다(당시 규칙은 항상 1일).
+        if bear_days is None and latest.get("유목민 매수"):
+            bear_days = 1.0
         dry = to_finite_number(latest.get("유목민 급감비율"))
         change = to_finite_number(latest.get("유목민 음봉등락률"))
         close_price = to_finite_number(latest.get("종가"))
@@ -1068,6 +1073,7 @@ def render_nomad_buy_table(results):
             f"<td>{surge_day}</td>"
             f'<td class="num">{fmt_cell(multiple, ",.2f", "배")}</td>'
             f"<td>{dry_day}</td>"
+            f'<td class="num">{fmt_cell(bear_days, ",.0f", "일")}</td>'
             f'<td class="num">{fmt_cell(dry, ",.1f", "%")}</td>'
             f'<td class="num price-delta {state}">{change_text}</td>'
             f'<td class="num">{fmt_cell(close_price, ",.0f", "원")}</td>'
@@ -1113,13 +1119,14 @@ def render_nomad_buy_table(results):
         f'<span class="nomad-count">{len(rows)}종목</span>'
         "</div>"
         '<div class="nomad-rule">'
-        "전일 대비 거래량 2배 이상 + 상승 &rarr; 다음날 거래량 25% 이하 + 음봉"
+        "최근 3거래일 내 거래량 2배↑·상승 &rarr; 이후 1~2일 연속 음봉 + 거래량 25%↓"
         "</div>"
         '<div style="overflow-x:auto;">'
         '<table class="nomad-table"><thead><tr>'
         "<th>종목</th><th>폭등일</th>"
         '<th class="num">거래량 배수</th>'
         "<th>음봉일</th>"
+        '<th class="num">음봉일수</th>'
         '<th class="num">급감 비율</th>'
         '<th class="num">음봉 등락률</th>'
         '<th class="num">종가</th>'
