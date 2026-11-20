@@ -374,6 +374,11 @@ st.markdown(
         font-size:.84rem; font-weight:700; color:var(--muted);
         margin:8px 0 6px 4px; letter-spacing:.01em;
     }
+    .nomad-card-badge {
+        font-size:12px; font-weight:800; color:#b45309;
+        background:#fef3c7; border:1px solid #fde68a;
+        border-radius:999px; padding:2px 9px; white-space:nowrap;
+    }
 
     /* ---------- 개요 테이블 보강 ---------- */
     .stock-overview-table tbody tr { transition:background .12s ease; }
@@ -887,6 +892,56 @@ def render_signal_card(
     )
 
 
+def render_nomad_signal_card(
+    title,
+    signal,
+    signal_date,
+    elapsed_days=None,
+):
+    """유목민 매수 신호 카드. 신호가 없으면 다른 카드와 같은 × 로 표시합니다."""
+    st.markdown(
+        f'<div class="signal-card-label">'
+        f'{escape(title)}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if signal == "매수" and signal_date:
+        badge = ""
+
+        if elapsed_days is not None and pd.notna(elapsed_days):
+            elapsed = int(elapsed_days)
+            badge = "오늘" if elapsed == 0 else f"{elapsed}일 전"
+
+        badge_html = (
+            f'<span class="nomad-card-badge">{escape(badge)}</span>'
+            if badge else ""
+        )
+
+        content = (
+            '<span style="display:inline-flex;align-items:center;'
+            'flex-wrap:wrap;column-gap:10px;row-gap:4px;">'
+            '<span style="font-size:40px;color:#f59e0b;line-height:1;">★</span>'
+            '<span style="font-size:22px;font-weight:800;color:#92400e;'
+            'line-height:1.2;white-space:nowrap;">'
+            f'{escape(format_short_date(signal_date))}'
+            '</span>'
+            f'{badge_html}'
+            '</span>'
+        )
+    else:
+        content = (
+            '<span style="color:#9ca3af;font-size:52px;'
+            'font-weight:800;line-height:1;">×</span>'
+        )
+
+    st.markdown(
+        '<div class="signal-card">'
+        + content
+        + '</div>',
+        unsafe_allow_html=True,
+    )
+
+
 # =========================================================
 # 전체 결과 요약표
 # =========================================================
@@ -1167,7 +1222,10 @@ def render_nomad_stats(results):
             item["보유일수"]: item for item in data.get("요약", [])
         }
 
-        row = {"종목": name, "신호수": data.get("신호수", 0)}
+        row = {"종목": name, "신호수(전체)": data.get("신호수", 0)}
+
+        chart_months = data.get("차트개월") or 18
+        row[f"차트표시({chart_months}개월)"] = data.get("차트신호수", 0)
 
         for horizon in horizons:
             item = summary.get(horizon, {})
@@ -1186,7 +1244,10 @@ def render_nomad_stats(results):
     if len(stats) > 1:
         row = {
             "종목": f"전체 {len(stats)}종목",
-            "신호수": sum(data.get("신호수", 0) for _, data in stats),
+            "신호수(전체)": sum(data.get("신호수", 0) for _, data in stats),
+            "차트표시(18개월)": sum(
+                data.get("차트신호수", 0) for _, data in stats
+            ),
         }
 
         for horizon in horizons:
@@ -1222,6 +1283,21 @@ def render_nomad_stats(results):
         if values:
             baselines.append(f"{horizon}일 {sum(values) / len(values):.1f}%")
 
+    spans = [
+        data.get("기간") for _, data in stats if data.get("기간")
+    ]
+    chart_from = next(
+        (data.get("차트시작일") for _, data in stats if data.get("차트시작일")),
+        None,
+    )
+
+    if spans:
+        st.caption(
+            f"집계 구간: {spans[0][0]} ~ {spans[0][1]} "
+            f"(차트는 {chart_from} 이후만 그리므로, "
+            "차트에 없는 과거 신호는 '신호수(전체)'에만 포함됩니다)"
+        )
+
     st.caption(
         "진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가 기준입니다. "
         "기준선은 같은 규칙으로 전 구간 아무 날에나 진입했을 때의 상승 비율"
@@ -1242,6 +1318,7 @@ def render_nomad_stats(results):
                 "급감비율(%)": record.get("급감비율"),
                 "진입일": record.get("진입일"),
                 "진입가": record.get("진입가"),
+                "차트표시": "표시" if record.get("차트표시") else "구간 밖",
                 **{
                     f"{horizon}일(%)": record.get(f"수익률{horizon}")
                     for horizon in horizons
@@ -1307,6 +1384,29 @@ def render_results_overview(results):
             compact=True,
         )
 
+        nomad_state = latest.get("유목민 신호")
+        nomad_date = latest.get("유목민 신호일")
+
+        if nomad_state == "매수" and nomad_date:
+            elapsed = latest.get("유목민 신호 경과일")
+
+            if elapsed is None:
+                elapsed_text = ""
+            elif int(elapsed) == 0:
+                elapsed_text = "오늘"
+            else:
+                elapsed_text = f"{int(elapsed)}일 전"
+
+            nomad_html = (
+                '<span class="ov-nomad">'
+                '<span class="ov-nomad-star">★</span>'
+                f'<span class="ov-nomad-date">{escape(str(nomad_date))}</span>'
+                f'<span class="ov-nomad-elapsed">{elapsed_text}</span>'
+                '</span>'
+            )
+        else:
+            nomad_html = '<span class="ov-nomad-none">—</span>'
+
         name_link = (
             f'<a href="#{anchor}" target="_self" '
             'style="display:block;color:inherit;'
@@ -1338,9 +1438,16 @@ def render_results_overview(results):
             f'{trend_lights_cell(latest)}</a>'
         )
 
+        nomad_link = (
+            f'<a href="#{anchor}" target="_self" '
+            'style="display:block;text-decoration:none;">'
+            f'{nomad_html}</a>'
+        )
+
         rows.append(
             '<tr>'
             f'<td>{name_link}</td>'
+            f'<td>{nomad_link}</td>'
             f'<td>{weekly_link}</td>'
             f'<td>{combined_link}</td>'
             f'<td>{trend_link}</td>'
@@ -1401,11 +1508,32 @@ def render_results_overview(results):
         'font-size:10px;line-height:1;font-weight:700;'
         'color:#94a3b8;'
         '}'
+        '.stock-overview-table .ov-nomad {'
+        'display:inline-flex;align-items:center;gap:6px;'
+        'padding:4px 10px;border-radius:999px;'
+        'background:#fef3c7;border:1px solid #fde68a;'
+        'white-space:nowrap;'
+        '}'
+        '.stock-overview-table .ov-nomad-star {'
+        'color:#b45309;font-size:15px;line-height:1;'
+        '}'
+        '.stock-overview-table .ov-nomad-date {'
+        'font-size:12.5px;font-weight:800;color:#92400e;'
+        'letter-spacing:-.01em;'
+        '}'
+        '.stock-overview-table .ov-nomad-elapsed {'
+        'font-size:11px;font-weight:700;color:#b45309;'
+        'background:#fff;border-radius:999px;padding:1px 6px;'
+        '}'
+        '.stock-overview-table .ov-nomad-none {'
+        'color:#cbd5e1;font-size:15px;'
+        '}'
         '</style>'
         '<div style="overflow-x:auto;">'
         '<table class="stock-overview-table">'
         '<thead><tr>'
         '<th>종목</th>'
+        '<th>유목민 신호</th>'
         '<th>최근 주간신호</th>'
         '<th>최근 주간·월간신호</th>'
         '<th>일간/주간/월간 추세</th>'
@@ -1907,10 +2035,25 @@ def render_stock_result(result, position):
             render_trend_lights(latest)
 
     # -----------------------------------------------------
-    # 두 번째 줄: 최근 7일 매매 신호
+    # 두 번째 줄: 유목민 신호 / 최근 7일 주간·결합 신호
     # -----------------------------------------------------
 
-    weekly_column, combined_column = st.columns(2)
+    nomad_column, weekly_column, combined_column = st.columns(3)
+
+    with nomad_column:
+        render_nomad_signal_card(
+            title="유목민 신호",
+            signal=latest.get(
+                "유목민 신호",
+                "신호 없음",
+            ),
+            signal_date=latest.get(
+                "유목민 신호일"
+            ),
+            elapsed_days=latest.get(
+                "유목민 신호 경과일"
+            ),
+        )
 
     with weekly_column:
         render_signal_card(
