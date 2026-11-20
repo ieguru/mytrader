@@ -241,6 +241,35 @@ st.markdown(
         font-size:.88rem; font-weight:700; letter-spacing:-0.01em;
     }
 
+    /* ---------- 최근 종가 카드(등락률 색상 포함) ---------- */
+    .price-card {
+        position:relative; background:var(--surface);
+        border:1px solid var(--line); border-radius:var(--radius-lg);
+        padding:16px 20px; box-shadow:var(--shadow-xs);
+        overflow:hidden;
+        min-height:var(--metric-h, 96px);
+        display:flex; flex-direction:column; justify-content:center;
+    }
+    .price-card::before {
+        content:''; position:absolute; left:0; top:0; bottom:0; width:4px;
+        background:linear-gradient(180deg,var(--accent),#8b5cf6);
+    }
+    .price-card .price-label {
+        color:var(--muted); font-weight:600; font-size:.87rem;
+        margin-bottom:6px;
+    }
+    .price-row {
+        display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;
+    }
+    .price-value {
+        font-size:.88rem; font-weight:700; letter-spacing:-0.01em;
+        color:var(--ink);
+    }
+    .price-delta { font-size:.78rem; font-weight:800; letter-spacing:-.01em; }
+    .price-delta.up   { color:#dc2626; }   /* 상승: 빨강 */
+    .price-delta.down { color:#2563eb; }   /* 하락: 파랑 */
+    .price-delta.flat { color:var(--faint); }
+
     /* ---------- 일간/주간/월간 추세 신호등 ---------- */
     .trend-card {
         position:relative; background:var(--surface);
@@ -848,6 +877,61 @@ def render_signal_card(
 # =========================================================
 # 전체 결과 요약표
 # =========================================================
+
+DELTA_STATE = (("up", "▲", "상승"), ("down", "▼", "하락"))
+
+
+def price_delta_state(value):
+    """등락률 부호를 CSS 상태로 바꿉니다."""
+    number = to_finite_number(value)
+
+    if number is None:
+        return "flat"
+
+    if number > 0:
+        return "up"
+
+    if number < 0:
+        return "down"
+
+    return "flat"
+
+
+def render_price_card(latest):
+    """
+    최근 종가 카드 — 값과 전일대비 등락률을 함께 표시합니다.
+
+    상승은 빨강, 하락은 파랑(국내 증시 표기와 동일).
+    값이 없으면 회색 '—'로 표시해, 계산 불가를 숨기지 않습니다.
+    """
+    close_price = to_finite_number(latest.get("종가"))
+    change = to_finite_number(latest.get("전일대비(%)"))
+
+    value_text = (
+        f"{close_price:,.0f}원" if close_price is not None else "—"
+    )
+
+    state = price_delta_state(change)
+
+    if change is None:
+        delta_text = "전일대비 —"
+    else:
+        arrow = "▲" if state == "up" else ("▼" if state == "down" else "")
+        delta_text = f"{arrow} {abs(change):.2f}%"
+
+    title = "전일 종가 대비 등락률"
+
+    st.markdown(
+        '<div class="price-card">'
+        '<div class="price-label">최근 종가</div>'
+        '<div class="price-row">'
+        f'<span class="price-value">{value_text}</span>'
+        f'<span class="price-delta {state}" title="{title}">'
+        f"{delta_text}</span>"
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
 
 def trend_lights_cell(latest):
     """
@@ -1496,18 +1580,7 @@ def render_stock_result(result, position):
         price_column, per_column, trend_column = st.columns(3)
 
         with price_column:
-            close_price = to_finite_number(
-                latest.get("종가")
-            )
-
-            st.metric(
-                "최근 종가",
-                (
-                    f"{close_price:,.0f}원"
-                    if close_price is not None
-                    else "—"
-                ),
-            )
+            render_price_card(latest)
 
         with per_column:
             per_value = to_finite_number(

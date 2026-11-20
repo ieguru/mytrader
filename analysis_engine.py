@@ -1253,10 +1253,28 @@ def analyze_frame(
         reference_date=reference_date,
     )
 
+    # 전일 종가와 전일대비 등락률
+    previous_close = None
+    change_pct = None
+
+    if len(df) >= 2:
+        previous_close = float(df["종가"].iloc[-2])
+
+        if previous_close:
+            change_pct = (
+                float(latest_row["종가"]) / previous_close - 1.0
+            ) * 100.0
+
     latest_status = {
         "종목명": stock_name,
         "기준일": reference_date.strftime("%Y-%m-%d"),
         "종가": float(latest_row["종가"]),
+        "전일 종가": previous_close,
+        "전일대비(%)": (
+            round(change_pct, 2)
+            if change_pct is not None
+            else None
+        ),
 
         # 기존 app.py가 읽는 키입니다.
         # 최근 조회 기간 안에 발생한 마지막 신호를 반환합니다.
