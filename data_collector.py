@@ -583,6 +583,49 @@ class DataCollector:
 # 앱 / 배치 실행용
 # =========================================================
 
+def investor_missing_report(frame, column):
+    """
+    투자자 순매수 누락을 (당일 미집계, 실제 누락)으로 나눕니다.
+
+    마지막 거래일의 투자자 수량은 장 마감 후에 집계되므로 그 날 값이
+    비어 있는 것은 정상입니다. 끝에서 이어지는 누락은 '당일 미집계'로 보고
+    알리지 않으며, 중간에 실제로 빠진 날짜가 있을 때만 알립니다.
+
+    반환값: (끝에서 이어지는 누락 수, 중간 누락 날짜 목록)
+    """
+    if frame is None or column not in frame.columns:
+        return 0, []
+
+    missing = frame[column].isna()
+    flags = missing.to_numpy()
+
+    if not flags.any():
+        return 0, []
+
+    trailing = 0
+
+    for flag in flags[::-1]:
+        if not flag:
+            break
+
+        trailing += 1
+
+    dates = list(frame.index)
+    missing_dates = [
+        dates[position] for position, flag in enumerate(flags) if flag
+    ]
+
+    if trailing:
+        missing_dates = missing_dates[:-trailing]
+
+    def label(value):
+        formatter = getattr(value, "strftime", None)
+
+        return formatter("%Y-%m-%d") if formatter else str(value)
+
+    return trailing, [label(value) for value in missing_dates]
+
+
 def fetch_data(
     ticker,
     start_date,
@@ -698,21 +741,19 @@ def fetch_data(
         and investors is not None
     ):
         for investor in INVESTOR_COLUMNS:
-            column = (
-                f"{investor}_순매수"
+            # 마지막 거래일(당일)은 집계 전이라 비어 있는 것이 정상입니다.
+            # 중간에 실제로 빠진 날짜가 있을 때만 알립니다.
+            _, missing_dates = investor_missing_report(
+                frame,
+                f"{investor}_순매수",
             )
 
-            missing_count = int(
-                frame[column]
-                .isna()
-                .sum()
-            )
-
-            if missing_count:
+            if missing_dates:
                 messages.append(
                     f"{investor} 순매수 수량이 "
-                    f"{missing_count}개 날짜에서 "
-                    "누락되었습니다. "
+                    f"{len(missing_dates)}개 날짜에서 "
+                    "누락되었습니다"
+                    f"({', '.join(missing_dates)}). "
                     "누락 이후 정확한 누적 수량은 "
                     "계산하지 않습니다."
                 )
