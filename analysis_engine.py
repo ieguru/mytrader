@@ -1472,6 +1472,322 @@ def nomad_signal_stats(
     }
 
 
+# =========================================================
+# 더블 탑 / 더블 바텀 (쌍고점 매도 · 쌍바닥 매수)
+# =========================================================
+
+DOUBLE_PIVOT = 5            # 좌우 5봉보다 높으면(낮으면) 확정 고점(저점)
+DOUBLE_TOLERANCE = 0.03     # 두 고점(저점) 가격 차이 3% 이내
+DOUBLE_MIN_GAP = 8          # 두 봉 사이 최소 간격(거래일)
+DOUBLE_MAX_GAP = 90         # 두 봉 사이 최대 간격(거래일)
+DOUBLE_MIN_DEPTH = 0.02     # 두 고점(저점) 사이 골(산)이 2% 이상이어야 인정
+DOUBLE_CONFIRM_WINDOW = 60  # 두 번째 봉 이후 넥라인 돌파를 기다리는 최대 봉수
+DOUBLE_COOLDOWN = 10        # 같은 패턴 신호의 최소 간격(거래일)
+DOUBLE_RECENT_WINDOW = 7    # 요약 화면에서 '최근 신호'로 볼 기간(달력일)
+
+
+def double_pivots(high, low, window=DOUBLE_PIVOT):
+    """
+    좌우 window봉보다 확실히 높은 고점과 낮은 저점의 위치를 찾습니다.
+
+    고점·저점은 window봉이 더 지나야 확정되므로, 그 이전에는 신호가 나오지
+    않습니다(미래 참조 방지).
+    """
+    count = len(high)
+    peaks = []
+    troughs = []
+
+    for index in range(window, count - window):
+        left_high = high[index - window:index]
+        right_high = high[index + 1:index + window + 1]
+        left_low = low[index - window:index]
+        right_low = low[index + 1:index + window + 1]
+
+        if not (
+            np.all(np.isfinite(left_high))
+            and np.all(np.isfinite(right_high))
+            and np.all(np.isfinite(left_low))
+            and np.all(np.isfinite(right_low))
+        ):
+            continue
+
+        if (
+            np.isfinite(high[index])
+            and high[index] >= left_high.max()
+            and high[index] >= right_high.max()
+        ):
+            peaks.append(index)
+
+        if (
+            np.isfinite(low[index])
+            and low[index] <= left_low.min()
+            and low[index] <= right_low.min()
+        ):
+            troughs.append(index)
+
+    return peaks, troughs
+
+
+def detect_double_patterns(
+    df,
+    pivot=DOUBLE_PIVOT,
+    tolerance=DOUBLE_TOLERANCE,
+    min_gap=DOUBLE_MIN_GAP,
+    max_gap=DOUBLE_MAX_GAP,
+    min_depth=DOUBLE_MIN_DEPTH,
+    confirm_window=DOUBLE_CONFIRM_WINDOW,
+    cooldown=DOUBLE_COOLDOWN,
+):
+    """
+    더블 탑(쌍고점)과 더블 바텀(쌍바닥)을 전 구간에서 찾습니다.
+
+    더블 탑 (매도)
+        ① 거의 같은 높이의 고점 두 개(가격 차이 tolerance 이내)
+        ② 사이에 min_depth 이상 내려간 골
+        ③ 두 번째 고점이 확정된 뒤 종가가 골(넥라인)을 아래로 이탈 -> 매도
+
+    더블 바텀 (매수)
+        ① 거의 같은 낮이의 저점 두 개
+        ② 사이에 min_depth 이상 올라간 산
+        ③ 두 번째 저점이 확정된 뒤 종가가 산(넥라인)을 위로 돌파 -> 매수
+
+    신호는 넥라인을 돌파한 날(확인일)에만 1이 됩니다.
+    """
+    frame = pd.DataFrame(index=df.index)
+
+    for column in (
+        "쌍고점신호",
+        "쌍바닥신호",
+    ):
+        frame[column] = 0
+
+    for column in (
+        "쌍고점 1차",
+        "쌍고점 2차",
+        "쌍고점 넥라인",
+        "쌍바닥 1차",
+        "쌍바닥 2차",
+        "쌍바닥 넥라인",
+        "쌍고점 이격",
+        "쌍바닥 이격",
+    ):
+        frame[column] = np.nan
+
+    if df is None or df.empty:
+        return frame
+
+    if not {"고가", "저가", "종가"}.issubset(df.columns):
+        return frame
+
+    high = pd.to_numeric(df["고가"], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(df["저가"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    count = len(df)
+
+    peaks, troughs = double_pivots(high, low, pivot)
+
+    def find_confirmation(start, predicate):
+        for index in range(start, min(start + confirm_window, count)):
+            if predicate(index):
+                return index
+
+        return None
+
+    def write(signal_index, prefix, first_value, second_value, neckline, gap_rate):
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix}신호")
+        ] = 1
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix} 1차")
+        ] = round(first_value, 2)
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix} 2차")
+        ] = round(second_value, 2)
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix} 넥라인")
+        ] = round(neckline, 2)
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix} 이격")
+        ] = round(gap_rate * 100, 2)
+
+    # ---------------- 더블 탑 ----------------
+    last_top = -10 ** 9
+
+    for position, first in enumerate(peaks):
+        for second in peaks[position + 1:]:
+            gap = second - first
+
+            if gap < min_gap:
+                continue
+
+            if gap > max_gap:
+                break
+
+            first_high = high[first]
+            second_high = high[second]
+
+            if not (np.isfinite(first_high) and np.isfinite(second_high)):
+                continue
+
+            lower_peak = min(first_high, second_high)
+
+            if lower_peak <= 0:
+                continue
+
+            gap_rate = abs(second_high - first_high) / lower_peak
+
+            if gap_rate > tolerance:
+                continue
+
+            neckline = np.nanmin(low[first:second + 1])
+
+            if not np.isfinite(neckline):
+                continue
+
+            if (lower_peak - neckline) / lower_peak < min_depth:
+                continue
+
+            signal_index = find_confirmation(
+                second + pivot,
+                lambda index: np.isfinite(close[index]) and close[index] < neckline,
+            )
+
+            if signal_index is None:
+                continue
+
+            if signal_index - last_top < cooldown:
+                continue
+
+            write(signal_index, "쌍고점", first_high, second_high, neckline, gap_rate)
+            last_top = signal_index
+            break
+
+    # ---------------- 더블 바텀 ----------------
+    last_bottom = -10 ** 9
+
+    for position, first in enumerate(troughs):
+        for second in troughs[position + 1:]:
+            gap = second - first
+
+            if gap < min_gap:
+                continue
+
+            if gap > max_gap:
+                break
+
+            first_low = low[first]
+            second_low = low[second]
+
+            if not (np.isfinite(first_low) and np.isfinite(second_low)):
+                continue
+
+            higher_trough = max(first_low, second_low)
+
+            if higher_trough <= 0:
+                continue
+
+            gap_rate = abs(second_low - first_low) / higher_trough
+
+            if gap_rate > tolerance:
+                continue
+
+            neckline = np.nanmax(high[first:second + 1])
+
+            if not np.isfinite(neckline):
+                continue
+
+            if (neckline - higher_trough) / neckline < min_depth:
+                continue
+
+            signal_index = find_confirmation(
+                second + pivot,
+                lambda index: np.isfinite(close[index]) and close[index] > neckline,
+            )
+
+            if signal_index is None:
+                continue
+
+            if signal_index - last_bottom < cooldown:
+                continue
+
+            write(signal_index, "쌍바닥", first_low, second_low, neckline, gap_rate)
+            last_bottom = signal_index
+            break
+
+    return frame
+
+
+def add_double_signal(df, **kwargs):
+    """더블 탑·더블 바텀 신호(0/1)를 컬럼으로 추가합니다."""
+    frame = df.copy()
+    patterns = detect_double_patterns(frame, **kwargs)
+
+    frame["쌍고점신호"] = patterns["쌍고점신호"].to_numpy()
+    frame["쌍바닥신호"] = patterns["쌍바닥신호"].to_numpy()
+
+    return frame
+
+
+def recent_double_signal(df, days=DOUBLE_RECENT_WINDOW):
+    """
+    최근 days일(달력일) 안에 확정된 마지막 더블 탑·더블 바텀 신호를 돌려줍니다.
+
+    쌍바닥은 매수, 쌍고점은 매도 신호입니다.
+    """
+    result = {
+        "신호": "신호 없음",
+        "패턴": None,
+        "발생일": None,
+        "경과일": None,
+        "1차": None,
+        "2차": None,
+        "넥라인": None,
+        "이격(%)": None,
+    }
+
+    if df is None or df.empty or not {"고가", "저가", "종가"}.issubset(df.columns):
+        return result
+
+    patterns = detect_double_patterns(df)
+
+    if patterns.empty:
+        return result
+
+    dates = pd.to_datetime(df.index)
+    reference = dates[-1]
+    cutoff = reference - pd.Timedelta(days=days - 1)
+
+    candidates = []
+
+    for index in range(len(patterns)):
+        if dates[index] < cutoff:
+            continue
+
+        if int(patterns["쌍바닥신호"].iat[index]) == 1:
+            candidates.append((index, "매수", "더블 바텀", "쌍바닥"))
+
+        if int(patterns["쌍고점신호"].iat[index]) == 1:
+            candidates.append((index, "매도", "더블 탑", "쌍고점"))
+
+    if not candidates:
+        return result
+
+    index, signal, pattern, prefix = sorted(candidates)[-1]
+
+    result.update({
+        "신호": signal,
+        "패턴": pattern,
+        "발생일": dates[index].strftime("%Y-%m-%d"),
+        "경과일": int((reference - dates[index]).days),
+        "1차": float(patterns[f"{prefix} 1차"].iat[index]),
+        "2차": float(patterns[f"{prefix} 2차"].iat[index]),
+        "넥라인": float(patterns[f"{prefix} 넥라인"].iat[index]),
+        "이격(%)": float(patterns[f"{prefix} 이격"].iat[index]),
+    })
+
+    return result
+
+
 def add_nomad_signal(df, **kwargs):
     """유목민 매수 신호(0/1)와 음봉일수를 컬럼으로 추가합니다."""
     frame = df.copy()
@@ -1648,6 +1964,7 @@ def analyze_frame(
 
     df = SignalGenerator.add_signals(df)
     df = add_nomad_signal(df)
+    df = add_double_signal(df)
 
     # -----------------------------------------------------
     # 백테스트
@@ -1783,6 +2100,16 @@ def analyze_frame(
     latest_status["유목민 신호일"] = recent_nomad["발생일"]
     latest_status["유목민 신호 음봉일수"] = recent_nomad["음봉일수"]
     latest_status["유목민 신호 경과일"] = recent_nomad["경과일"]
+
+    # 최근 7일 이내 더블 탑(매도)·더블 바텀(매수) 신호
+    recent_double = recent_double_signal(df)
+
+    latest_status["더블 신호"] = recent_double["신호"]
+    latest_status["더블 패턴"] = recent_double["패턴"]
+    latest_status["더블 신호일"] = recent_double["발생일"]
+    latest_status["더블 경과일"] = recent_double["경과일"]
+    latest_status["더블 넥라인"] = recent_double["넥라인"]
+    latest_status["더블 이격(%)"] = recent_double["이격(%)"]
 
     # 과거 신호의 5·10·20거래일 성과
     nomad_stats = nomad_signal_stats(df)

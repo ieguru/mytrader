@@ -1488,6 +1488,22 @@ def render_results_overview(results):
         else:
             nomad_html = '<span class="ov-nomad-none">—</span>'
 
+        double_state = latest.get("더블 신호")
+        double_date = latest.get("더블 신호일")
+
+        if double_state in ("매수", "매도") and double_date:
+            double_kind = "buy" if double_state == "매수" else "sell"
+            double_arrow = "▲" if double_state == "매수" else "▼"
+
+            double_html = (
+                f'<span class="ov-double {double_kind}">'
+                f'<span class="ov-double-arrow">{double_arrow}</span>'
+                f'<span class="ov-double-date">{escape(str(double_date))}</span>'
+                "</span>"
+            )
+        else:
+            double_html = '<span class="ov-nomad-none">—</span>'
+
         name_link = (
             f'<a href="#{anchor}" target="_self" '
             'style="display:block;color:inherit;'
@@ -1525,10 +1541,17 @@ def render_results_overview(results):
             f'{nomad_html}</a>'
         )
 
+        double_link = (
+            f'<a href="#{anchor}" target="_self" '
+            'style="display:block;text-decoration:none;">'
+            f'{double_html}</a>'
+        )
+
         rows.append(
             '<tr>'
             f'<td>{name_link}</td>'
             f'<td>{nomad_link}</td>'
+            f'<td>{double_link}</td>'
             f'<td>{weekly_link}</td>'
             f'<td>{combined_link}</td>'
             f'<td>{trend_link}</td>'
@@ -1609,12 +1632,30 @@ def render_results_overview(results):
         '.stock-overview-table .ov-nomad-none {'
         'color:#cbd5e1;font-size:15px;'
         '}'
+        '.stock-overview-table .ov-double {'
+        'display:inline-flex;align-items:center;gap:5px;'
+        'padding:4px 10px;border-radius:999px;white-space:nowrap;'
+        'border:1px solid transparent;'
+        '}'
+        '.stock-overview-table .ov-double.buy {'
+        'background:#fee2e2;border-color:#fecaca;color:#b91c1c;'
+        '}'
+        '.stock-overview-table .ov-double.sell {'
+        'background:#dbeafe;border-color:#bfdbfe;color:#1d4ed8;'
+        '}'
+        '.stock-overview-table .ov-double-arrow {'
+        'font-size:13px;font-weight:900;line-height:1;'
+        '}'
+        '.stock-overview-table .ov-double-date {'
+        'font-size:12.5px;font-weight:800;letter-spacing:-.01em;'
+        '}'
         '</style>'
         '<div style="overflow-x:auto;">'
         '<table class="stock-overview-table">'
         '<thead><tr>'
         '<th>종목</th>'
         '<th>유목민 신호</th>'
+        '<th>더블 패턴</th>'
         '<th>최근 주간신호</th>'
         '<th>최근 주간·월간신호</th>'
         '<th>일간/주간/월간 추세</th>'
@@ -2119,7 +2160,7 @@ def render_stock_result(result, position):
     # 두 번째 줄: 유목민 신호 / 최근 7일 주간·결합 신호
     # -----------------------------------------------------
 
-    nomad_column, weekly_column, combined_column = st.columns(3)
+    nomad_column, double_column, weekly_column, combined_column = st.columns(4)
 
     with nomad_column:
         render_nomad_signal_card(
@@ -2134,6 +2175,19 @@ def render_stock_result(result, position):
             elapsed_days=latest.get(
                 "유목민 신호 경과일"
             ),
+        )
+
+    with double_column:
+        render_signal_card(
+            title="더블 패턴",
+            signal=latest.get(
+                "더블 신호",
+                "신호 없음",
+            ),
+            signal_date=latest.get(
+                "더블 신호일"
+            ),
+            reference_date=reference_date,
         )
 
     with weekly_column:
