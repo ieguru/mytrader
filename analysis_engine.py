@@ -2306,7 +2306,8 @@ def add_moving_average(
     규칙 (짝을 이룬 거래만 신호로 남깁니다)
         ① 매수: MA5가 MA20을 상향 돌파
         ② 매수: MA5 > MA20 이면서 MA5 기울기가 음수에서 양수로 전환
-        ③ 매도: MA5 기울기 < 0 이고 음봉(종가 < 시가)이며 종가 <= MA5
+        ③ 매도: 음봉(종가 < 시가)이면서 종가 <= MA5
+           (MA5 기울기 조건은 사용하지 않습니다)
         ④ 보유 중에는 매수 신호를 무시하고, 미보유 상태에서는 매도 신호를 무시합니다.
            (매수 → 매도 → 매수 → 매도 순서로만 짝이 만들어집니다)
 
@@ -2360,8 +2361,7 @@ def add_moving_average(
 
     bearish = close < open_price
     sell_raw = (
-        (slope_fast < 0)
-        & bearish
+        bearish
         & (close <= sell_ma_col)
     ).fillna(False)
 
