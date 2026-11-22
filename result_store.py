@@ -54,7 +54,7 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image
 
-SNAPSHOT_VERSION = 12
+SNAPSHOT_VERSION = 13
 
 # 미리보기 설정 (스냅샷 1건이 수 MB를 넘지 않도록)
 PREVIEW_MAX_WIDTH = 1200
@@ -255,6 +255,7 @@ def build_snapshot(
             "nomad_stats": json_safe(result.get("nomad_stats") or {}),
             "nomad_sell_stats": json_safe(result.get("nomad_sell_stats") or {}),
             "double_stats": json_safe(result.get("double_stats") or {}),
+            "ma_stats": json_safe(result.get("ma_stats") or {}),
             "messages": json_safe(result.get("messages") or []),
             "image_filename": result.get("image_filename"),
             "preview": make_preview(result.get("png_bytes")),
@@ -363,6 +364,7 @@ def restore_snapshot(payload, image_dir=None):
             "nomad_stats": item.get("nomad_stats") or {},
             "nomad_sell_stats": item.get("nomad_sell_stats") or {},
             "double_stats": item.get("double_stats") or {},
+            "ma_stats": item.get("ma_stats") or {},
             "messages": item.get("messages") or [],
             "image_filename": item.get("image_filename"),
             "image_download_name": image_name,

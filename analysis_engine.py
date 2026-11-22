@@ -633,6 +633,8 @@ class Backtester:
         price_col="종가",
         execution="next_open",
         cost=TRADING_COST_PCT,
+        buy_col=None,
+        sell_col=None,
     ):
         """
         신호 다음 거래일 시가로 매수·매도합니다.
@@ -682,8 +684,10 @@ class Backtester:
             else:
                 bars.append((None, None))
 
-        buy_col = f"{signal_type}_Buy"
-        sell_col = f"{signal_type}_Sell"
+        # 신호 컬럼 이름을 직접 넘기면 그 컬럼을 씁니다.
+        # (이동평균처럼 'X_Buy' 규칙을 따르지 않는 신호용)
+        buy_col = buy_col or f"{signal_type}_Buy"
+        sell_col = sell_col or f"{signal_type}_Sell"
 
         in_position = False
         entry_date = None
@@ -1226,6 +1230,9 @@ NOMAD_DRY_DAYS = (1, 2)    # 폭등일 이후 1~2일 연속 음봉
 NOMAD_SELL_DRY_RATIO = 0.52  # 매도 전용 급감 기준(매수 30%와 별도)
 NOMAD_CHART_MONTHS = 18    # charts.DISPLAY_MONTHS와 같아야 합니다(차트 표시 구간)
 NOMAD_RECENT_WINDOW = 7    # 전체 결과 요약에서 '최근 신호'로 볼 기간(달력일)
+
+MA_FAST = 5                # 이동평균 단기
+MA_SLOW = 20               # 이동평균 장기
 
 
 def nomad_patterns(
@@ -2279,6 +2286,211 @@ def detect_nomad_sell(
     return status
 
 
+# =========================================================
+# 이동평균선 교차 (MA5 / MA20)
+# =========================================================
+
+def add_moving_average(df, fast=MA_FAST, slow=MA_SLOW):
+    """
+    단기·장기 단순이동평균과 교차 신호를 컬럼으로 추가합니다.
+
+    - MA5가 MA20을 상향 돌파한 날 -> 이동평균매수 = 1
+    - MA5가 MA20을 하향 돌파한 날 -> 이동평균매도 = 1
+
+    교차 판정은 그날 종가로 계산된 이동평균값끼리 비교하며,
+    이동평균이 아직 계산되지 않는 초기 구간은 신호를 만들지 않습니다.
+    """
+    frame = df.copy()
+
+    if "종가" not in frame.columns:
+        return frame
+
+    close = pd.to_numeric(frame["종가"], errors="coerce")
+
+    frame[f"MA{fast}"] = close.rolling(fast, min_periods=fast).mean()
+    frame[f"MA{slow}"] = close.rolling(slow, min_periods=slow).mean()
+
+    fast_col = frame[f"MA{fast}"]
+    slow_col = frame[f"MA{slow}"]
+
+    ready = fast_col.notna() & slow_col.notna()
+
+    # 1: 단기가 위, 0: 단기가 아래, NaN: 계산 불가
+    above = (fast_col > slow_col).where(ready)
+
+    previous = above.shift(1)
+
+    frame["이동평균매수"] = ((previous == 0) & (above == 1)).astype(int)
+    frame["이동평균매도"] = ((previous == 1) & (above == 0)).astype(int)
+
+    return frame
+
+
+def ma_signal_stats(
+    df,
+    horizons=NOMAD_FORWARD_DAYS,
+    fast=MA_FAST,
+    slow=MA_SLOW,
+):
+    """
+    이동평균 교차 신호가 난 뒤 5·10·20거래일 성과를 집계합니다.
+
+    - 진입: 신호 다음 거래일 시가
+    - 청산: 신호일 + N거래일 종가
+    - 비용: 왕복 TRADING_COST_PCT(0.3%p) 차감
+    - 매수는 상승, 매도는 하락이 승리이며 기준선도 같은 방향으로 계산
+    """
+    empty_block = {"신호수": 0, "요약": [], "신호목록": [], "방향": None}
+
+    result = {
+        "기간": None,
+        "보유기간": list(horizons),
+        "단기": fast,
+        "장기": slow,
+        "매수": dict(empty_block),
+        "매도": dict(empty_block),
+    }
+
+    if df is None or df.empty or not {"시가", "종가"}.issubset(df.columns):
+        return result
+
+    frame = add_moving_average(df, fast=fast, slow=slow)
+
+    close = pd.to_numeric(frame["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(frame["시가"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(frame.index)
+    count = len(frame)
+
+    result["기간"] = [
+        dates[0].strftime("%Y-%m-%d"),
+        dates[-1].strftime("%Y-%m-%d"),
+    ]
+
+    # 기준선: 방향별로 따로 계산 (매도는 '하락'이 승리)
+    base_by_direction = {1: {}, -1: {}}
+
+    for horizon in horizons:
+        samples = {1: [], -1: []}
+
+        for index in range(count - horizon - 1):
+            entry = open_price[index + 1]
+            exit_price = close[index + horizon]
+
+            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
+                signed = (exit_price / entry - 1.0) - TRADING_COST_RATE
+                samples[1].append(signed > 0)
+                samples[-1].append(-signed - TRADING_COST_RATE > 0)
+
+        for key in (1, -1):
+            base_by_direction[key][horizon] = (
+                round(float(np.mean(samples[key]) * 100), 1)
+                if samples[key]
+                else None
+            )
+
+    fast_col = f"MA{fast}"
+    slow_col = f"MA{slow}"
+
+    for label, column, direction in (
+        ("매수", "이동평균매수", 1),
+        ("매도", "이동평균매도", -1),
+    ):
+        baselines = base_by_direction[direction]
+        records = []
+
+        for index in np.flatnonzero(frame[column].to_numpy(dtype=int) == 1):
+            entry_index = index + 1
+
+            if entry_index >= count:
+                continue
+
+            entry = open_price[entry_index]
+
+            if not np.isfinite(entry) or entry <= 0:
+                continue
+
+            record = {
+                "신호일": dates[index].strftime("%Y-%m-%d"),
+                "진입일": dates[entry_index].strftime("%Y-%m-%d"),
+                "진입가": round(float(entry), 0),
+                fast_col: (
+                    round(float(frame[fast_col].iat[index]), 0)
+                    if np.isfinite(float(frame[fast_col].iat[index]))
+                    else None
+                ),
+                slow_col: (
+                    round(float(frame[slow_col].iat[index]), 0)
+                    if np.isfinite(float(frame[slow_col].iat[index]))
+                    else None
+                ),
+                "차트표시": bool(
+                    dates[index]
+                    >= dates[-1] - pd.DateOffset(months=NOMAD_CHART_MONTHS)
+                ),
+            }
+
+            for horizon in horizons:
+                exit_index = index + horizon
+                value = None
+
+                if exit_index < count and np.isfinite(close[exit_index]):
+                    value = round(
+                        (close[exit_index] / entry - 1.0) * 100.0 * direction
+                        - TRADING_COST_PCT,
+                        2,
+                    )
+
+                record[f"수익률{horizon}"] = value
+
+            records.append(record)
+
+        summary = []
+
+        for horizon in horizons:
+            values = [
+                r[f"수익률{horizon}"]
+                for r in records
+                if r[f"수익률{horizon}"] is not None
+            ]
+
+            summary.append({
+                "보유일수": horizon,
+                "표본": len(values),
+                "승률": (
+                    None
+                    if not values
+                    else round(float(np.mean([v > 0 for v in values]) * 100), 1)
+                ),
+                "평균": (
+                    None if not values else round(float(np.mean(values)), 2)
+                ),
+                "중앙값": (
+                    None if not values else round(float(np.median(values)), 2)
+                ),
+                "최선": None if not values else round(float(max(values)), 2),
+                "최악": None if not values else round(float(min(values)), 2),
+                "기준선": baselines.get(horizon),
+                "초과": (
+                    None
+                    if not values or baselines.get(horizon) is None
+                    else round(
+                        float(np.mean([v > 0 for v in values]) * 100)
+                        - baselines[horizon],
+                        1,
+                    )
+                ),
+            })
+
+        result[label] = {
+            "신호수": len(records),
+            "요약": summary,
+            "신호목록": records,
+            "방향": "매수" if direction == 1 else "매도(하락이 +)",
+        }
+
+    return result
+
+
 def analyze_frame(
     frame,
     stock_name,
@@ -2343,6 +2555,7 @@ def analyze_frame(
     df = add_nomad_signal(df)
     df = add_nomad_sell_signal(df)
     df = add_double_signal(df)
+    df = add_moving_average(df)
 
     # -----------------------------------------------------
     # 백테스트
@@ -2353,23 +2566,36 @@ def analyze_frame(
             "Weekly",
             "주간 신호",
             "Weekly",
+            None,
+            None,
         ),
         (
             "Weekly+Monthly",
             "주·월간 신호",
             "Weekly_Monthly",
+            None,
+            None,
+        ),
+        (
+            "MA_Cross",
+            "이동평균 신호",
+            "MA_Cross",
+            "이동평균매수",
+            "이동평균매도",
         ),
     ]
 
     trades = {}
     metrics = []
 
-    for key, label, signal_type in strategies:
+    for key, label, signal_type, buy_col, sell_col in strategies:
         trade_frame = Backtester.backtest(
             df,
             signal_type=signal_type,
             monthly_filter=None,
             price_col="종가",
+            buy_col=buy_col,
+            sell_col=sell_col,
         )
 
         trades[key] = trade_frame
@@ -2497,6 +2723,9 @@ def analyze_frame(
     # 더블 패턴 5·10·20거래일 성과
     double_stats = double_signal_stats(df)
 
+    # 이동평균(MA5/MA20) 교차 신호 5·10·20거래일 성과
+    ma_stats = ma_signal_stats(df)
+
     # 최근 7일 이내 더블 탑(매도)·더블 바텀(매수) 신호
     recent_double = recent_double_signal(df)
 
@@ -2518,5 +2747,6 @@ def analyze_frame(
         "nomad_stats": nomad_stats,
         "nomad_sell_stats": nomad_sell_stats,
         "double_stats": double_stats,
+        "ma_stats": ma_stats,
         "messages": messages,
     }

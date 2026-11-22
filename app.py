@@ -1352,10 +1352,13 @@ def collect_strategy_stats(result):
     top = (double.get("쌍고점") or {})
 
     nomad_sell = result.get("nomad_sell_stats") or {}
+    ma = result.get("ma_stats") or {}
 
     entries = [
         ("유목민 매수", nomad, "신호 다음날 시가 진입"),
         ("유목민 매도", nomad_sell, "신호 다음날 시가 진입(하락이 +)"),
+        ("이동평균 매수", ma.get("매수"), "MA5가 MA20 상향 돌파 다음날 시가 진입"),
+        ("이동평균 매도", ma.get("매도"), "MA5가 MA20 하향 돌파 다음날 시가 진입(하락이 +)"),
         ("쌍바닥 매수", bottom, "넥라인 돌파 다음날 시가 진입"),
         ("쌍고점 매도", top, "넥라인 이탈 다음날 시가 진입(하락이 +)"),
     ]
@@ -1422,7 +1425,8 @@ def render_nomad_stats(results):
     st.caption(
         "진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가 기준이며 "
         "왕복 비용 0.3%를 뺀 값입니다. "
-        "**매수 신호(유목민 매수·쌍바닥)는 상승이, 매도 신호(유목민 매도·쌍고점)는 하락이 승리**입니다. "
+        "**매수 신호(유목민 매수·이동평균 매수·쌍바닥)는 상승이, "
+        "매도 신호(유목민 매도·이동평균 매도·쌍고점)는 하락이 승리**입니다. "
         "기준선도 같은 방향으로 계산합니다(매수=무작위 진입 시 상승 비율, 매도=하락 비율). "
         "승률과 평균은 모두 매수 관점 손익(매도는 하락을 +)으로 표시했습니다."
         + (f" · 기준선: {baseline_text}" if baseline_text else "")
@@ -2422,6 +2426,7 @@ def render_stock_result(result, position):
     strategy_names = {
         "Weekly": "주간 신호",
         "Weekly+Monthly": "주·월간 신호",
+        "MA_Cross": "이동평균 신호",
     }
 
     trades_by_strategy = result.get(
@@ -2432,6 +2437,7 @@ def render_stock_result(result, position):
     strategy_order = [
         "Weekly",
         "Weekly+Monthly",
+        "MA_Cross",
     ]
 
     strategy_order.extend(
@@ -2824,6 +2830,7 @@ def run_batch(
                 "nomad_stats": analysis.get("nomad_stats") or {},
                 "nomad_sell_stats": analysis.get("nomad_sell_stats") or {},
                 "double_stats": analysis.get("double_stats") or {},
+                "ma_stats": analysis.get("ma_stats") or {},
                 "png_bytes": None,
                 "image_filename": None,
             }
