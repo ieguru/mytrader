@@ -1231,8 +1231,8 @@ NOMAD_SELL_DRY_RATIO = 0.52  # 매도 전용 급감 기준(매수 30%와 별도)
 NOMAD_CHART_MONTHS = 18    # charts.DISPLAY_MONTHS와 같아야 합니다(차트 표시 구간)
 NOMAD_RECENT_WINDOW = 7    # 전체 결과 요약에서 '최근 신호'로 볼 기간(달력일)
 
-MA_FAST = 2                # 매수 교차 단기선(2일선)
-MA_SLOW = 20               # 매수 교차 장기선(20일선) · 기울기 기준
+MA_FAST = 5                # 매수 교차 단기선(5일선)
+MA_SLOW = 20               # 매수 교차 장기선(20일선)
 MA_SELL = 5                # 매도 기준선(5일선)
 MA_SLOPE_LOOKBACK = 1      # MA20 기울기 비교 간격(거래일)
 
@@ -2303,14 +2303,15 @@ def add_moving_average(
     """
     단기·장기 단순이동평균과 교차 신호를 컬럼으로 추가합니다.
 
-    - MA2가 MA20을 상향 돌파한 날 -> 이동평균매수 = 1
-    - 일봉이 음봉이면서 종가가 MA5 아래로 내려온 날 -> 이동평균매도 = 1
-    - 단, MA20 기울기가 0보다 작으면(하락 추세) 매수를 금지합니다.
+    규칙 (짝을 이룬 거래만 신호로 남깁니다)
+        ① 매수: MA5가 MA20을 상향 돌파
+        ② 매수: MA5 > MA20 이면서 MA5 기울기가 음수에서 양수로 전환
+        ③ 매도: MA5 기울기 < 0 이고 음봉(종가 < 시가)이며 종가 <= MA5
+        ④ 보유 중에는 매수 신호를 무시하고, 미보유 상태에서는 매도 신호를 무시합니다.
+           (매수 → 매도 → 매수 → 매도 순서로만 짝이 만들어집니다)
 
-    교차 판정은 그날 종가로 계산된 이동평균값끼리 비교하며,
-    이동평균이 아직 계산되지 않는 초기 구간은 신호를 만들지 않습니다.
-    기울기는 MA20[오늘] - MA20[slope_lookback일 전] 으로 계산합니다.
-    금지된 교차는 '이동평균매수차단'에 1로 남겨 차트에서 구분해 볼 수 있습니다.
+    기울기는 MA5[오늘] - MA5[1일 전] 으로 계산합니다.
+    짝이 만들어지지 않은 원시 신호는 '이동평균매수원시'·'이동평균매도원시'에 남깁니다.
     """
     frame = df.copy()
 
@@ -2338,22 +2339,31 @@ def add_moving_average(
 
     previous = above.shift(1)
 
-    buy_raw = (previous == 0) & (above == 1)
+    # MA5 기울기 (양수 전환 판정용)
+    slope_fast = fast_col - fast_col.shift(1)
+    frame[f"MA{fast}기울기"] = slope_fast
 
-    # 매도: 음봉(종가 < 시가)이면서 종가가 MA5 아래로 내려온 첫날
+    # MA20 기울기: 0보다 작으면(하락) 매수 금지
+    slope = slow_col - slow_col.shift(slope_lookback)
+    frame[f"MA{slow}기울기"] = slope
+
     if "시가" in frame.columns:
         open_price = pd.to_numeric(frame["시가"], errors="coerce")
     else:
         open_price = close
 
-    below_sell_ma = (close < sell_ma_col).where(sell_ma_col.notna())
-    bearish = close < open_price
-    sell_condition = bearish & below_sell_ma.fillna(False)
-    sell_raw = sell_condition & ~sell_condition.shift(1).fillna(False)
+    cross_up = (previous == 0) & (above == 1)
+    slope_turn_up = (slope_fast > 0) & (slope_fast.shift(1) <= 0)
+    rising_above = (above == 1) & slope_turn_up
 
-    # MA20 기울기: 0보다 작으면(하락) 매수 금지
-    slope = slow_col - slow_col.shift(slope_lookback)
-    frame[f"MA{slow}기울기"] = slope
+    buy_raw = (cross_up | rising_above).fillna(False)
+
+    bearish = close < open_price
+    sell_raw = (
+        (slope_fast < 0)
+        & bearish
+        & (close <= sell_ma_col)
+    ).fillna(False)
 
     blocked = slope.isna()
 
@@ -2362,9 +2372,29 @@ def add_moving_average(
     else:
         blocked = blocked | (slope < 0)
 
-    frame["이동평균매수"] = (buy_raw & ~blocked).astype(int)
+    buy_signal = (buy_raw & ~blocked).fillna(False)
+
+    # 짝짓기: 보유 중 매수 무시, 미보유 중 매도 무시
+    buy_paired = np.zeros(len(frame), dtype=int)
+    sell_paired = np.zeros(len(frame), dtype=int)
+
+    holding = False
+
+    for position in range(len(frame)):
+        if not holding:
+            if buy_signal.iat[position]:
+                buy_paired[position] = 1
+                holding = True
+        else:
+            if sell_raw.iat[position]:
+                sell_paired[position] = 1
+                holding = False
+
+    frame["이동평균매수"] = buy_paired
+    frame["이동평균매도"] = sell_paired
+    frame["이동평균매수원시"] = buy_signal.astype(int)
+    frame["이동평균매도원시"] = sell_raw.astype(int)
     frame["이동평균매수차단"] = (buy_raw & blocked).astype(int)
-    frame["이동평균매도"] = sell_raw.astype(int)
 
     return frame
 

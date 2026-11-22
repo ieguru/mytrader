@@ -567,7 +567,7 @@ class ChartPlotter:
                 "o",
                 "#b91c1c",
                 62,
-                "이동평균 매수 (MA2↑MA20)",
+                "이동평균 매수 (MA5↑MA20·기울기 전환)",
                 "저가",
                 0.955,
             ),
@@ -576,7 +576,7 @@ class ChartPlotter:
                 "o",
                 "#1e40af",
                 62,
-                "이동평균 매도 (음봉·MA5 이탈)",
+                "이동평균 매도 (기울기↓·음봉·MA5 이탈)",
                 "고가",
                 1.045,
             ),
@@ -712,8 +712,7 @@ class ChartPlotter:
 
         # 이동평균선(MA5/MA20)을 함께 그려 교차 신호를 눈으로 확인할 수 있게 합니다.
         for column, color, label, style, width in (
-            ("MA2", "#dc2626", "MA2", "--", 1.3),
-            ("MA5", "#f97316", "MA5", "-", 1.7),
+            ("MA5", "#f97316", "MA5", "-", 1.8),
             ("MA20", "#7c3aed", "MA20", "-", 1.7),
         ):
             if column not in df.columns:
