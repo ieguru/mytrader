@@ -554,22 +554,13 @@ class ChartPlotter:
                 0.90,
             ),
             (
-                "쌍바닥신호",
-                "^",
-                "#0d9488",
-                160,
-                "쌍바닥 매수 (double bottom)",
-                "저가",
-                0.91,
-            ),
-            (
-                "쌍고점신호",
-                "v",
-                "#7c3aed",
-                160,
-                "쌍고점 매도 (double top)",
+                "유목민매도신호",
+                "*",
+                "#2563eb",
+                340,
+                "유목민 매도 (급감 40%)",
                 "고가",
-                1.09,
+                1.10,
             ),
         ]
 
@@ -606,6 +597,44 @@ class ChartPlotter:
                 s=size,
                 edgecolors="black",
                 linewidth=0.5,
+                label=label,
+                zorder=6,
+            )
+
+        # 더블 패턴은 원(circle)으로 표시합니다.
+        for column, color, label, price_column, factor in (
+            (
+                "쌍바닥신호",
+                "#84cc16",
+                "쌍바닥 매수 (double bottom)",
+                "저가",
+                0.90,
+            ),
+            (
+                "쌍고점신호",
+                "#38bdf8",
+                "쌍고점 매도 (double top)",
+                "고가",
+                1.10,
+            ),
+        ):
+            if column not in df.columns:
+                continue
+
+            signals = pd.to_numeric(df[column], errors="coerce")
+            subset = df.loc[signals.eq(1)].dropna(subset=[price_column])
+
+            if subset.empty:
+                continue
+
+            ax.scatter(
+                subset.index,
+                subset[price_column] * factor,
+                marker="o",
+                facecolors="none",
+                edgecolors=color,
+                s=210,
+                linewidths=2.0,
                 label=label,
                 zorder=6,
             )

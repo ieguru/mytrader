@@ -909,6 +909,7 @@ def render_nomad_signal_card(
     signal,
     signal_date,
     elapsed_days=None,
+    direction="buy",
 ):
     """유목민 매수 신호 카드. 신호가 없으면 다른 카드와 같은 × 로 표시합니다."""
     st.markdown(
@@ -917,23 +918,32 @@ def render_nomad_signal_card(
         unsafe_allow_html=True,
     )
 
-    if signal == "매수" and signal_date:
+    if signal in ("매수", "매도") and signal_date:
         badge = ""
 
         if elapsed_days is not None and pd.notna(elapsed_days):
             elapsed = int(elapsed_days)
             badge = "오늘" if elapsed == 0 else f"{elapsed}일 전"
 
+        star_color = "#f59e0b" if direction == "buy" else "#2563eb"
+        date_color = "#92400e" if direction == "buy" else "#1e40af"
+        badge_bg = "#fef3c7" if direction == "buy" else "#dbeafe"
+        badge_fg = "#b45309" if direction == "buy" else "#1d4ed8"
+        badge_bd = "#fde68a" if direction == "buy" else "#bfdbfe"
+
         badge_html = (
-            f'<span class="nomad-card-badge">{escape(badge)}</span>'
-            if badge else ""
+            f'<span class="nomad-card-badge" style="color:{badge_fg};'
+            f'background:{badge_bg};border:1px solid {badge_bd};">'
+            f"{escape(signal)}"
+            + (f" · {escape(badge)}" if badge else "")
+            + "</span>"
         )
 
         content = (
             '<span style="display:inline-flex;align-items:center;'
             'flex-wrap:wrap;column-gap:10px;row-gap:4px;">'
-            '<span style="font-size:40px;color:#f59e0b;line-height:1;">★</span>'
-            '<span style="font-size:22px;font-weight:800;color:#92400e;'
+            f'<span style="font-size:40px;color:{star_color};line-height:1;">★</span>'
+            f'<span style="font-size:22px;font-weight:800;color:{date_color};'
             'line-height:1.2;white-space:nowrap;">'
             f'{escape(format_short_date(signal_date))}'
             '</span>'
@@ -1162,61 +1172,102 @@ def trend_lights_cell(latest):
 
 def render_nomad_buy_table(results):
     """
-    '유목민 매수 종목' 표를 그립니다.
+    '유목민 매수/매도 종목' 표를 그립니다.
 
-    조건: 전일 대비 거래량 2배 이상 + 상승 -> 다음날 거래량 25% 이하 + 음봉
-    조건을 충족한 종목이 없으면 아무것도 그리지 않습니다.
+    매수: 거래량 2배↑·상승 -> 1~2일 음봉 + 거래량 25%↓
+    매도: 거래량 2배↑·하락 -> 1~2일 양봉 + 거래량 25%↓ (대칭 규칙)
+    조건 충족 종목이 없으면 아무것도 그리지 않습니다.
     """
+    plans = (
+        (
+            "매수",
+            "유목민 매수",
+            "유목민 폭등일",
+            "유목민 음봉일",
+            "유목민 음봉일수",
+            "유목민 급감비율",
+            "유목민 음봉등락률",
+            "is-buy",
+            "★",
+        ),
+        (
+            "매도",
+            "유목민 매도",
+            "유목민 매도 폭등일",
+            "유목민 매도 양봉일",
+            "유목민 매도 양봉일수",
+            "유목민 매도 급감비율",
+            "유목민 매도 양봉등락률",
+            "is-sell",
+            "★",
+        ),
+    )
+
     rows = []
+    counts = {"매수": 0, "매도": 0}
 
     for position, result in enumerate(results, start=1):
         latest = result.get("latest") or {}
 
-        if not latest.get("유목민 매수"):
-            continue
+        for (
+            kind,
+            flag_key,
+            spike_key,
+            confirm_key,
+            confirm_days_key,
+            dry_key,
+            change_key,
+            css,
+            star,
+        ) in plans:
+            if not latest.get(flag_key):
+                continue
 
-        name = escape(str(result["stock_name"]))
-        ticker = escape(str(result["ticker"]))
-        anchor = f"stock-detail-{position}"
+            counts[kind] += 1
 
-        multiple = to_finite_number(latest.get("유목민 거래량배수"))
-        bear_days = to_finite_number(latest.get("유목민 음봉일수"))
+            name = escape(str(result["stock_name"]))
+            ticker = escape(str(result["ticker"]))
+            anchor = f"stock-detail-{position}"
 
-        # 이전 스냅샷은 음봉일수 키가 없습니다(당시 규칙은 항상 1일).
-        if bear_days is None and latest.get("유목민 매수"):
-            bear_days = 1.0
-        dry = to_finite_number(latest.get("유목민 급감비율"))
-        change = to_finite_number(latest.get("유목민 음봉등락률"))
-        close_price = to_finite_number(latest.get("종가"))
-        per_value = to_finite_number(latest.get("PER"))
+            multiple = to_finite_number(latest.get(spike_key and "유목민 거래량배수"))
+            multiple = to_finite_number(
+                latest.get(
+                    "유목민 거래량배수"
+                    if kind == "매수"
+                    else "유목민 매도 거래량배수"
+                )
+            )
+            confirm_days = to_finite_number(latest.get(confirm_days_key))
+            dry = to_finite_number(latest.get(dry_key))
+            change = to_finite_number(latest.get(change_key))
+            close_price = to_finite_number(latest.get("종가"))
+            per_value = to_finite_number(latest.get("PER"))
 
-        state = price_delta_state(change)
-        arrow = "▲" if state == "up" else ("▼" if state == "down" else "")
-        change_text = "-" if change is None else f"{arrow} {abs(change):.2f}%"
+            state = price_delta_state(change)
+            arrow = "▲" if state == "up" else ("▼" if state == "down" else "")
+            change_text = "-" if change is None else f"{arrow} {abs(change):.2f}%"
 
-        def fmt_cell(value, spec, suffix=""):
-            return f"{value:{spec}}{suffix}" if value is not None else "-"
+            def fmt_cell(value, spec, suffix=""):
+                return f"{value:{spec}}{suffix}" if value is not None else "-"
 
-        surge_day = escape(str(latest.get("유목민 폭등일") or "-"))
-        dry_day = escape(str(latest.get("유목민 음봉일") or "-"))
-
-        rows.append(
-            "<tr>"
-            f'<td><a href="#{anchor}" target="_self" '
-            'style="font-weight:700;color:inherit;text-decoration:none;">'
-            f"{name} "
-            '<span style="color:#808080;font-size:12px;font-weight:400;">'
-            f"({ticker})</span></a></td>"
-            f"<td>{surge_day}</td>"
-            f'<td class="num">{fmt_cell(multiple, ",.2f", "배")}</td>'
-            f"<td>{dry_day}</td>"
-            f'<td class="num">{fmt_cell(bear_days, ",.0f", "일")}</td>'
-            f'<td class="num">{fmt_cell(dry, ",.1f", "%")}</td>'
-            f'<td class="num price-delta {state}">{change_text}</td>'
-            f'<td class="num">{fmt_cell(close_price, ",.0f", "원")}</td>'
-            f'<td class="num">{fmt_cell(per_value, ",.1f")}</td>'
-            "</tr>"
-        )
+            rows.append(
+                "<tr>"
+                f'<td><a href="#{anchor}" target="_self" '
+                'style="font-weight:700;color:inherit;text-decoration:none;">'
+                f"{name} "
+                '<span style="color:#808080;font-size:12px;font-weight:400;">'
+                f"({ticker})</span></a></td>"
+                f'<td><span class="nomad-kind {css}">{star} {kind}</span></td>'
+                f"<td>{escape(str(latest.get(spike_key) or '-'))}</td>"
+                f'<td class="num">{fmt_cell(multiple, ",.2f", "배")}</td>'
+                f"<td>{escape(str(latest.get(confirm_key) or '-'))}</td>"
+                f'<td class="num">{fmt_cell(confirm_days, ",.0f", "일")}</td>'
+                f'<td class="num">{fmt_cell(dry, ",.1f", "%")}</td>'
+                f'<td class="num price-delta {state}">{change_text}</td>'
+                f'<td class="num">{fmt_cell(close_price, ",.0f", "원")}</td>'
+                f'<td class="num">{fmt_cell(per_value, ",.1f")}</td>'
+                "</tr>"
+            )
 
     if not rows:
         return
@@ -1229,6 +1280,8 @@ def render_nomad_buy_table(results):
         ".nomad-head .nomad-count { font-size:.78rem; font-weight:800;"
         " color:#92400e; background:#fef3c7; border:1px solid #fde68a;"
         " border-radius:999px; padding:3px 10px; }"
+        ".nomad-head .nomad-count.is-sell { color:#1e40af; background:#dbeafe;"
+        " border-color:#bfdbfe; }"
         ".nomad-rule { font-size:.8rem; color:#64748b; margin:0 0 10px 2px; }"
         ".nomad-table { width:100%; border-collapse:separate; border-spacing:0;"
         " font-size:14px; background:#fff; border:1px solid #fde68a;"
@@ -1247,32 +1300,46 @@ def render_nomad_buy_table(results):
         ".nomad-table .price-delta.up { color:#dc2626; }"
         ".nomad-table .price-delta.down { color:#2563eb; }"
         ".nomad-table .price-delta.flat { color:#475569; }"
+        ".nomad-table .nomad-kind { display:inline-block; padding:2px 9px;"
+        " border-radius:999px; font-size:11.5px; font-weight:800; white-space:nowrap; }"
+        ".nomad-table .nomad-kind.is-buy { color:#92400e; background:#fef3c7;"
+        " border:1px solid #fde68a; }"
+        ".nomad-table .nomad-kind.is-sell { color:#1e40af; background:#dbeafe;"
+        " border:1px solid #bfdbfe; }"
+    )
+
+    count_html = "".join(
+        f'<span class="nomad-count {css_name}">{kind} {counts[kind]}종목</span>'
+        for kind, css_name in (("매수", ""), ("매도", "is-sell"))
+        if counts[kind]
     )
 
     head = (
         '<div class="nomad-wrap">'
         '<div class="nomad-head">'
-        '<span class="nomad-title">🐪 유목민 매수 종목</span>'
-        f'<span class="nomad-count">{len(rows)}종목</span>'
+        '<span class="nomad-title">🐪 유목민 신호 종목</span>'
+        f"{count_html}"
         "</div>"
         '<div class="nomad-rule">'
-        "최근 3거래일 내 거래량 2배↑·상승 &rarr; 이후 1~2일 연속 음봉 + 거래량 25%↓"
+        "매수 = 거래량 2배↑·상승 &rarr; 1~2일 연속 음봉 + 거래량 25%↓ &nbsp;|&nbsp; "
+        "매도 = 거래량 2배↑·하락 &rarr; 1~2일 연속 양봉 + 거래량 40%↓ (매도 전용 완화 기준)"
         "</div>"
         '<div style="overflow-x:auto;">'
         '<table class="nomad-table"><thead><tr>'
-        "<th>종목</th><th>폭등일</th>"
+        "<th>종목</th><th>구분</th><th>폭등일</th>"
         '<th class="num">거래량 배수</th>'
-        "<th>음봉일</th>"
-        '<th class="num">음봉일수</th>'
+        "<th>확인일</th>"
+        '<th class="num">확인일수</th>'
         '<th class="num">급감 비율</th>'
-        '<th class="num">음봉 등락률</th>'
+        '<th class="num">확인 등락률</th>'
         '<th class="num">종가</th>'
         '<th class="num">PER</th>'
         "</tr></thead><tbody>"
     )
 
     st.markdown(
-        "<style>" + css + "</style>" + head + "".join(rows) + "</tbody></table></div></div>",
+        "<style>" + css + "</style>" + head + "".join(rows)
+        + "</tbody></table></div></div>",
         unsafe_allow_html=True,
     )
 
@@ -1284,8 +1351,11 @@ def collect_strategy_stats(result):
     bottom = (double.get("쌍바닥") or {})
     top = (double.get("쌍고점") or {})
 
+    nomad_sell = result.get("nomad_sell_stats") or {}
+
     entries = [
         ("유목민 매수", nomad, "신호 다음날 시가 진입"),
+        ("유목민 매도", nomad_sell, "신호 다음날 시가 진입(하락이 +)"),
         ("쌍바닥 매수", bottom, "넥라인 돌파 다음날 시가 진입"),
         ("쌍고점 매도", top, "넥라인 이탈 다음날 시가 진입(하락이 +)"),
     ]
@@ -1382,6 +1452,17 @@ def render_nomad_stats(results):
         f"{h}일 {np.mean(v):.1f}%" for h, v in sorted(baselines.items()) if v
     )
 
+    st.warning(
+        "**더블 패턴(쌍바닥·쌍고점)은 참고용입니다 — 측정 결과 우위가 없습니다.** "
+        "8종목 3년(976거래일) 실데이터에서 쌍바닥 매수는 5·10·20일 승률 "
+        "47%·50%·51%로 기준선(51.8%·53.8%·57.7%)을 넘지 못했습니다. "
+        "쌍고점 매도는 신호 뒤 가격이 오히려 오르는 경우가 많아 매도 신호로 쓸 수 없습니다. "
+        "넥라인 돌파 시 거래량 1.2·1.5·2.0배 확인 필터를 붙여도 승률이 "
+        "기준선을 넘지 못했습니다(오차범위 ±12~17%p). "
+        "차트 마커와 표시는 패턴 위치를 눈으로 확인하는 용도로만 유지합니다.",
+        icon="⚠️",
+    )
+
     st.caption(
         "진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가 기준입니다. "
         "쌍고점(매도)은 하락한 경우를 +로 계산했습니다. "
@@ -1463,11 +1544,24 @@ def render_results_overview(results):
             compact=True,
         )
 
-        nomad_state = latest.get("유목민 신호")
-        nomad_date = latest.get("유목민 신호일")
+        nomad_pills = []
 
-        if nomad_state == "매수" and nomad_date:
-            elapsed = latest.get("유목민 신호 경과일")
+        for state_key, date_key, elapsed_key, css in (
+            ("유목민 신호", "유목민 신호일", "유목민 신호 경과일", "is-buy"),
+            (
+                "유목민 매도 신호",
+                "유목민 매도 신호일",
+                "유목민 매도 신호 경과일",
+                "is-sell",
+            ),
+        ):
+            state = latest.get(state_key)
+            date_value = latest.get(date_key)
+
+            if state not in ("매수", "매도") or not date_value:
+                continue
+
+            elapsed = latest.get(elapsed_key)
 
             if elapsed is None:
                 elapsed_text = ""
@@ -1476,15 +1570,19 @@ def render_results_overview(results):
             else:
                 elapsed_text = f"{int(elapsed)}일 전"
 
-            nomad_html = (
-                '<span class="ov-nomad">'
+            nomad_pills.append(
+                f'<span class="ov-nomad {css}">'
                 '<span class="ov-nomad-star">★</span>'
-                f'<span class="ov-nomad-date">{escape(str(nomad_date))}</span>'
+                f'<span class="ov-nomad-date">{escape(str(date_value))}</span>'
                 f'<span class="ov-nomad-elapsed">{elapsed_text}</span>'
-                '</span>'
+                "</span>"
             )
-        else:
-            nomad_html = '<span class="ov-nomad-none">—</span>'
+
+        nomad_html = (
+            "".join(nomad_pills)
+            if nomad_pills
+            else '<span class="ov-nomad-none">—</span>'
+        )
 
         double_state = latest.get("더블 신호")
         double_date = latest.get("더블 신호일")
@@ -1614,8 +1712,14 @@ def render_results_overview(results):
         'display:inline-flex;align-items:center;gap:6px;'
         'padding:4px 10px;border-radius:999px;'
         'background:#fef3c7;border:1px solid #fde68a;'
-        'white-space:nowrap;'
+        'white-space:nowrap;margin:1px 0;'
         '}'
+        '.stock-overview-table .ov-nomad.is-sell {'
+        'background:#dbeafe;border-color:#bfdbfe;'
+        '}'
+        '.stock-overview-table .ov-nomad.is-sell .ov-nomad-star { color:#1d4ed8; }'
+        '.stock-overview-table .ov-nomad.is-sell .ov-nomad-date { color:#1e40af; }'
+        '.stock-overview-table .ov-nomad.is-sell .ov-nomad-elapsed { color:#1d4ed8; }'
         '.stock-overview-table .ov-nomad-star {'
         'color:#b45309;font-size:15px;line-height:1;'
         '}'
@@ -1636,10 +1740,16 @@ def render_results_overview(results):
         'border:1px solid transparent;'
         '}'
         '.stock-overview-table .ov-double.buy {'
-        'background:#fee2e2;border-color:#fecaca;color:#b91c1c;'
+        'background:#ecfccb;border-color:#bef264;color:#3f6212;'
         '}'
         '.stock-overview-table .ov-double.sell {'
-        'background:#dbeafe;border-color:#bfdbfe;color:#1d4ed8;'
+        'background:#e0f2fe;border-color:#7dd3fc;color:#075985;'
+        '}'
+        '.stock-overview-table .th-note {'
+        'display:inline-block;margin-left:5px;padding:1px 6px;'
+        'font-size:9.5px;font-weight:800;color:#64748b;'
+        'background:#f1f5f9;border:1px solid #e2e8f0;border-radius:999px;'
+        'vertical-align:middle;letter-spacing:0;'
         '}'
         '.stock-overview-table .ov-double-arrow {'
         'font-size:13px;font-weight:900;line-height:1;'
@@ -1653,7 +1763,7 @@ def render_results_overview(results):
         '<thead><tr>'
         '<th>종목</th>'
         '<th>유목민 신호</th>'
-        '<th>더블 패턴</th>'
+        '<th>더블 패턴<span class="th-note">참고</span></th>'
         '<th>최근 주간신호</th>'
         '<th>최근 주간·월간신호</th>'
         '<th>일간/주간/월간 추세</th>'
@@ -2161,23 +2271,36 @@ def render_stock_result(result, position):
     nomad_column, double_column, weekly_column, combined_column = st.columns(4)
 
     with nomad_column:
+        buy_active = latest.get("유목민 신호") == "매수"
+        sell_active = latest.get("유목민 매도 신호") == "매도"
+
+        if buy_active:
+            card_signal = "매수"
+            card_date = latest.get("유목민 신호일")
+            card_elapsed = latest.get("유목민 신호 경과일")
+            card_direction = "buy"
+        elif sell_active:
+            card_signal = "매도"
+            card_date = latest.get("유목민 매도 신호일")
+            card_elapsed = latest.get("유목민 매도 신호 경과일")
+            card_direction = "sell"
+        else:
+            card_signal = "신호 없음"
+            card_date = None
+            card_elapsed = None
+            card_direction = "buy"
+
         render_nomad_signal_card(
             title="유목민 신호",
-            signal=latest.get(
-                "유목민 신호",
-                "신호 없음",
-            ),
-            signal_date=latest.get(
-                "유목민 신호일"
-            ),
-            elapsed_days=latest.get(
-                "유목민 신호 경과일"
-            ),
+            signal=card_signal,
+            signal_date=card_date,
+            elapsed_days=card_elapsed,
+            direction=card_direction,
         )
 
     with double_column:
         render_signal_card(
-            title="더블 패턴",
+            title="더블 패턴 (참고)",
             signal=latest.get(
                 "더블 신호",
                 "신호 없음",
@@ -2740,6 +2863,7 @@ def run_batch(
                     )
                 ),
                 "nomad_stats": analysis.get("nomad_stats") or {},
+                "nomad_sell_stats": analysis.get("nomad_sell_stats") or {},
                 "double_stats": analysis.get("double_stats") or {},
                 "png_bytes": None,
                 "image_filename": None,
