@@ -2392,4 +2392,3 @@ def analyze_frame(
         "double_stats": double_stats,
         "messages": messages,
     }
-
