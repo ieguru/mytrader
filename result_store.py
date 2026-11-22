@@ -54,7 +54,7 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image
 
-SNAPSHOT_VERSION = 10
+SNAPSHOT_VERSION = 12
 
 # 미리보기 설정 (스냅샷 1건이 수 MB를 넘지 않도록)
 PREVIEW_MAX_WIDTH = 1200
