@@ -1,2244 +1,2777 @@
-﻿# charts.py
-"""
-5패널 종합차트를 고해상도 PNG bytes로 반환합니다.
-
-패널 1:
-    주가·목표가·매매 신호
-
-패널 2:
-    거래량
-
-패널 3:
-    일간·주간·월간 MACD Oscillator
-
-패널 4:
-    외국인·기관·개인 누적 순매수 수량
-
-패널 5:
-    매출액·영업이익·순이익
-
-실제 데이터 표시 기간:
-    마지막 가격 데이터 날짜 기준 최근 18개월
-
-분기 재무:
-    현재 분기를 포함한 최근 6개 분기를 표시합니다.
-    엑셀에 숫자가 입력된 미래 분기도 추가합니다.
-    분기 시작월의 첫 가용 거래일 위치에 표시합니다.
-
-    종료 분기:
-        매출액: 회색 채움 막대
-        영업이익·순이익: 실선, 채운 마커
-
-    진행 중·미래 분기:
-        매출액: 연한 회색 빗금 막대
-        영업이익·순이익: 점선, 빈 마커
-        분기명에 '(예상)' 표시
-
-미래 날짜 축:
-    모든 패널의 X축을 동일하게 확장합니다.
-    미래 구간은 월~금 기준의 표시용 날짜를 사용합니다.
-    미래 KRX 휴장일을 반영한 실제 거래일 달력은 아닙니다.
-
-    미래 구간에는 가격·거래량·MACD·수급 데이터를
-    생성하거나 연장하지 않습니다.
-
-주의:
-    분기 시작 위치는 시각적 배치입니다.
-    해당 날짜에 실적이 공개되었다는 의미가 아닙니다.
-
-    엑셀에 공시일·실적/추정 구분이 없으므로,
-    종료 분기는 실적 표시로 간주합니다.
-    종료 분기의 값이 실제 확정 실적인지 검증하지는 않습니다.
-
-    투자자 누적 순매수는 전체 조회 기간에서 계산한 후,
-    표시 구간만 최근 18개월로 제한합니다.
-
-    공매도 및 대차거래 데이터는 사용하지 않습니다.
-"""
-
-import io
-import os
-import platform
-import threading
-
-from pathlib import Path
-
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
-
-from matplotlib import font_manager
-from matplotlib.lines import Line2D
-from matplotlib.ticker import FuncFormatter
+﻿"""화면 출력이나 자동 파일 저장 없이 분석 결과를 반환합니다."""
 
 import numpy as np
 import pandas as pd
 
 
 # =========================================================
-# 기본 설정
+# 재무 데이터
 # =========================================================
 
-_CHART_LOCK = threading.RLock()
-
-# 축의 단위 표시만 바꾸며 숫자를 환산하지 않습니다.
-# 모든 재무 입력값이 억원 단위이면 "억원"으로 변경하세요.
-FINANCIAL_UNIT_LABEL = "엑셀 입력 단위"
-
-DISPLAY_MONTHS = 18
-FINANCIAL_QUARTERS = 6
-
-DAILY_MACD_LINEWIDTH = 0.65
-WEEKLY_MACD_LINEWIDTH = 1.30
-MONTHLY_MACD_LINEWIDTH = 2.60
-
-VOLUME_COLUMNS = {
-    "외국인합계_순매수": "외국인_누적순매수수량",
-    "기관합계_순매수": "기관_누적순매수수량",
-    "개인_순매수": "개인_누적순매수수량",
-}
-
-
-# =========================================================
-# 공통 함수
-# =========================================================
-
-def to_numeric(series):
-    """숫자 문자열과 결측값을 정리합니다."""
-    if not pd.api.types.is_numeric_dtype(series):
-        series = (
-            series.astype("string")
-            .str.replace(",", "", regex=False)
-            .str.strip()
-        )
-
-    return (
-        pd.to_numeric(series, errors="coerce")
-        .replace([np.inf, -np.inf], np.nan)
-        .astype(float)
-    )
-
-
-def number_formatter(value, position):
-    return f"{value:,.0f}"
-
-
-def panel_message(ax, message):
-    ax.text(
-        0.5,
-        0.45,
-        message,
-        transform=ax.transAxes,
-        ha="center",
-        va="center",
-        fontsize=9,
-        color="#6b7280",
-        linespacing=1.5,
-    )
-
-
-def set_panel_style(ax, title, ylabel):
-    ax.set_title(
-        title,
-        loc="left",
-        fontsize=10,
-        fontweight="bold",
-        pad=3,
-    )
-
-    ax.set_ylabel(
-        ylabel,
-        fontsize=9,
-        fontweight="bold",
-        labelpad=5,
-    )
-
-    ax.yaxis.set_major_formatter(
-        FuncFormatter(number_formatter)
-    )
-
-    ax.tick_params(
-        axis="both",
-        labelsize=8,
-    )
-
-    ax.grid(
-        True,
-        alpha=0.22,
-        linewidth=0.6,
-    )
-
-    ax.set_axisbelow(True)
-
-
-# =========================================================
-# 차트 클래스
-# =========================================================
-
-class ChartPlotter:
-
-    # -----------------------------------------------------
-    # 한글 폰트
-    # -----------------------------------------------------
+class FinancialDataManager:
+    """재무 데이터 및 분기 정보 관리"""
 
     @staticmethod
-    def setup_korean_font():
-        base_dir = Path(__file__).resolve().parent
+    def load_target_price(excel_file, sheet_name, stock_name=""):
+        """
+        엑셀에서 분기별 목표가를 읽습니다.
 
-        candidates = [
-            base_dir / "fonts" / "NanumGothic.ttf",
-            base_dir / "fonts" / "NotoSansKR-Regular.ttf",
-        ]
-
-        system = platform.system()
-
-        if system == "Windows":
-            windows_dir = Path(
-                os.environ.get(
-                    "WINDIR",
-                    r"C:\Windows",
-                )
-            )
-
-            candidates.extend([
-                windows_dir / "Fonts" / "malgun.ttf",
-                windows_dir / "Fonts" / "malgunbd.ttf",
-            ])
-
-        elif system == "Darwin":
-            candidates.extend([
-                Path(
-                    "/System/Library/Fonts/"
-                    "Supplemental/AppleGothic.ttf"
-                ),
-                Path("/Library/Fonts/AppleGothic.ttf"),
-            ])
-
-        else:
-            candidates.extend([
-                Path(
-                    "/usr/share/fonts/truetype/"
-                    "nanum/NanumGothic.ttf"
-                ),
-                Path(
-                    "/usr/share/fonts/truetype/"
-                    "nanum/NanumBarunGothic.ttf"
-                ),
-            ])
-
-        for font_path in candidates:
-            if not font_path.is_file():
-                continue
-
-            font_manager.fontManager.addfont(
-                str(font_path)
-            )
-
-            font_name = (
-                font_manager.FontProperties(
-                    fname=str(font_path)
-                )
-                .get_name()
-            )
-
-            plt.rcParams["font.family"] = [font_name]
-            plt.rcParams["font.sans-serif"] = [font_name]
-            plt.rcParams["axes.unicode_minus"] = False
-
-            return font_name
-
-        installed = {
-            font.name
-            for font in font_manager.fontManager.ttflist
-        }
-
-        for font_name in (
-            "NanumGothic",
-            "NanumBarunGothic",
-            "Malgun Gothic",
-            "AppleGothic",
-            "Noto Sans CJK KR",
-            "Noto Sans KR",
-        ):
-            if font_name not in installed:
-                continue
-
-            plt.rcParams["font.family"] = [font_name]
-            plt.rcParams["font.sans-serif"] = [font_name]
-            plt.rcParams["axes.unicode_minus"] = False
-
-            return font_name
-
-        raise RuntimeError(
-            "한글 폰트를 찾지 못했습니다. "
-            "Community Cloud에서는 packages.txt에 "
-            "fonts-nanum을 추가하거나, "
-            "fonts 폴더에 NanumGothic.ttf를 넣으세요."
+        - 음수 목표가는 0으로 보정
+        - 빈 값은 NaN 유지
+        - 100원 단위 반올림
+        """
+        df = pd.read_excel(
+            excel_file,
+            sheet_name=sheet_name,
         )
 
-    # -----------------------------------------------------
-    # 데이터 준비
-    # -----------------------------------------------------
-
-    @staticmethod
-    def prepare_chart_frame(df):
-        if df is None or df.empty:
-            raise ValueError("차트 데이터가 없습니다.")
-
-        frame = df.copy()
-
-        if frame.columns.duplicated().any():
-            raise ValueError(
-                "차트 데이터에 중복된 컬럼이 있습니다."
-            )
-
-        if isinstance(frame.index, pd.DatetimeIndex):
-            dates = frame.index
-
-        elif "날짜" in frame.columns:
-            date_values = frame["날짜"]
-
-            if pd.api.types.is_numeric_dtype(
-                date_values.dtype
-            ):
-                date_values = (
-                    date_values
-                    .astype("Int64")
-                    .astype("string")
-                )
-
-            dates = pd.DatetimeIndex(
-                pd.to_datetime(
-                    date_values,
-                    errors="coerce",
-                )
-            )
-
-        else:
-            raise ValueError(
-                "날짜 인덱스 또는 '날짜' 컬럼이 필요합니다."
-            )
-
-        if dates.tz is not None:
-            dates = (
-                dates
-                .tz_convert("Asia/Seoul")
-                .tz_localize(None)
-            )
-
-        frame.index = dates.normalize()
-
-        frame = frame.loc[
-            ~frame.index.isna()
-        ].copy()
-
-        frame = frame.sort_index()
-
-        frame = frame.loc[
-            ~frame.index.duplicated(keep="last")
-        ].copy()
-
-        if frame.empty:
-            raise ValueError(
-                "유효한 날짜 데이터가 없습니다."
-            )
-
-        required = {
-            "시가",
-            "고가",
-            "저가",
-            "종가",
-            "거래량",
-        }
-
-        missing = required - set(frame.columns)
+        required = {"분기", "목표가"}
+        missing = required - set(df.columns)
 
         if missing:
             raise ValueError(
-                "차트 필수 컬럼 누락: "
+                "목표가 데이터 컬럼 누락: "
                 + ", ".join(sorted(missing))
             )
 
-        for column in required:
-            frame[column] = to_numeric(
-                frame[column]
-            )
+        df = df.copy()
+        df["분기"] = df["분기"].astype(str).str.strip()
 
-        frame["날짜"] = frame.index
-
-        frame["분기"] = [
-            (
-                f"{timestamp.year}."
-                f"{(timestamp.month - 1) // 3 + 1}Q"
-            )
-            for timestamp in frame.index
-        ]
-
-        # 표시 기간을 자르기 전에 전체 조회 기간을 누적합니다.
-        for source, target in VOLUME_COLUMNS.items():
-            if source not in frame.columns:
-                continue
-
-            values = to_numeric(frame[source])
-
-            frame[source] = values
-
-            # 누락값을 0으로 대체하지 않습니다.
-            # 누락 이후 정확한 누적값은 알 수 없으므로 NaN 유지.
-            frame[target] = values.cumsum(
-                skipna=False
-            )
-
-        return frame
-
-    @staticmethod
-    def filter_recent_period(df):
-        """실제 데이터의 최근 18개월을 반환합니다."""
-        if df is None or df.empty:
-            return pd.DataFrame()
-
-        reference_date = df.index.max().normalize()
-
-        cutoff = (
-            reference_date
-            - pd.DateOffset(months=DISPLAY_MONTHS)
-        )
-
-        return (
-            df.loc[
-                (df.index >= cutoff)
-                & (df.index <= reference_date)
-            ]
-            .copy()
-            .reset_index(drop=True)
-        )
-
-    @staticmethod
-    def filter_last_2_years(df):
-        """
-        이전 외부 호출과의 호환용 함수.
-
-        이름과 관계없이 최근 18개월을 적용합니다.
-        """
-        return ChartPlotter.filter_recent_period(df)
-
-    # -----------------------------------------------------
-    # 패널 1: 주가·목표가·매매 신호
-    # -----------------------------------------------------
-
-    @staticmethod
-    def plot_candlestick(ax, df, width=0.6):
-        plot_df = df.dropna(
-            subset=["시가", "고가", "저가", "종가"]
-        )
-
-        if plot_df.empty:
-            panel_message(
-                ax,
-                "표시할 캔들 데이터가 없습니다.",
-            )
-            return
-
-        up = plot_df.loc[
-            plot_df["종가"] >= plot_df["시가"]
-        ]
-
-        down = plot_df.loc[
-            plot_df["종가"] < plot_df["시가"]
-        ]
-
-        for subset, color, edgecolor in (
-            (up, "#dc2626", "#991b1b"),
-            (down, "#2563eb", "#1e40af"),
-        ):
-            if subset.empty:
-                continue
-
-            ax.vlines(
-                subset.index,
-                subset["저가"],
-                subset["고가"],
-                color=color,
-                linewidth=0.7,
-                zorder=2,
-            )
-
-            bottom = subset[
-                ["시가", "종가"]
-            ].min(axis=1)
-
-            height = (
-                subset["종가"] - subset["시가"]
-            ).abs()
-
-            ax.bar(
-                subset.index,
-                height,
-                width=width,
-                bottom=bottom,
-                color=color,
-                edgecolor=edgecolor,
-                linewidth=0.4,
-                zorder=3,
-            )
-
-            doji = subset.loc[height.eq(0)]
-
-            if not doji.empty:
-                ax.hlines(
-                    doji["종가"],
-                    doji.index - width / 2,
-                    doji.index + width / 2,
-                    color=color,
-                    linewidth=0.9,
-                    zorder=3,
-                )
-
-        last_index = plot_df.index[-1]
-
-        ax.axvspan(
-            last_index - 0.5,
-            last_index + 0.5,
-            color="gold",
-            alpha=0.08,
-        )
-
-    @staticmethod
-    def plot_signals(ax, df):
-        specs = [
-            (
-                "Weekly_Buy",
-                "^",
-                "#dc2626",
-                80,
-                "주간 매수",
-                "저가",
-                0.97,
-            ),
-            (
-                "Weekly_Sell",
-                "v",
-                "#2563eb",
-                80,
-                "주간 매도",
-                "고가",
-                1.03,
-            ),
-            (
-                "Weekly_Monthly_Buy",
-                "D",
-                "#16a34a",
-                100,
-                "주간·월간 매수",
-                "저가",
-                0.94,
-            ),
-            (
-                "Weekly_Monthly_Sell",
-                "X",
-                "#9740e8",
-                100,
-                "주간·월간 매도",
-                "고가",
-                1.06,
-            ),
-            (
-                "유목민신호",
-                "*",
-                "#f59e0b",
-                340,
-                "유목민 매수",
-                "저가",
-                0.90,
-            ),
-            (
-                "유목민매도신호",
-                "*",
-                "#2563eb",
-                340,
-                "유목민 매도 (급감 52%)",
-                "고가",
-                1.10,
-            ),
-            (
-                "이동평균매수",
-                "o",
-                "#b91c1c",
-                62,
-                "이동평균 매수 (MA5↑MA20)",
-                "저가",
-                0.955,
-            ),
-            (
-                "이동평균매도",
-                "o",
-                "#1e40af",
-                62,
-                "이동평균 매도 (MA5↓MA20)",
-                "고가",
-                1.045,
-            ),
-        ]
-
-        for (
-            column,
-            marker,
-            color,
-            size,
-            label,
-            price_column,
-            factor,
-        ) in specs:
-            if column not in df.columns:
-                continue
-
-            signals = pd.to_numeric(
-                df[column],
+        df["목표가"] = (
+            pd.to_numeric(
+                df["목표가"],
                 errors="coerce",
             )
+            .clip(lower=0)
+        )
 
-            subset = (
-                df.loc[signals.eq(1)]
-                .dropna(subset=[price_column])
-            )
+        target_prices = {}
 
-            if subset.empty:
-                continue
-
-            ax.scatter(
-                subset.index,
-                subset[price_column] * factor,
-                marker=marker,
-                color=color,
-                s=size,
-                edgecolors="black",
-                linewidth=0.5,
-                label=label,
-                zorder=6,
-            )
-
-        # 더블 패턴은 원(circle)으로 표시합니다.
-        for column, color, label, price_column, factor in (
-            (
-                "쌍바닥신호",
-                "#84cc16",
-                "쌍바닥 매수 (double bottom)",
-                "저가",
-                0.90,
-            ),
-            (
-                "쌍고점신호",
-                "#38bdf8",
-                "쌍고점 매도 (double top)",
-                "고가",
-                1.10,
-            ),
+        for quarter, price in zip(
+            df["분기"],
+            df["목표가"],
         ):
-            if column not in df.columns:
-                continue
-
-            signals = pd.to_numeric(df[column], errors="coerce")
-            subset = df.loc[signals.eq(1)].dropna(subset=[price_column])
-
-            if subset.empty:
-                continue
-
-            ax.scatter(
-                subset.index,
-                subset[price_column] * factor,
-                marker="o",
-                facecolors="none",
-                edgecolors=color,
-                s=210,
-                linewidths=2.0,
-                label=label,
-                zorder=6,
-            )
-
-    @staticmethod
-    def plot_price_panel(ax, df, stock_name):
-        set_panel_style(
-            ax,
-            f"1. {stock_name} — 주가·목표가·매매 신호"
-            f" / 실제 데이터 최근 {DISPLAY_MONTHS}개월",
-            "가격 (원)",
-        )
-
-        ChartPlotter.plot_candlestick(ax, df)
-
-        if "목표가" in df.columns:
-            target = (
-                to_numeric(df["목표가"])
-                .clip(lower=0)
-            )
-
-            valid = target.dropna()
-
-            if not valid.empty:
-                ax.plot(
-                    df.index,
-                    target,
-                    color="#ff7f0e",
-                    linestyle="--",
-                    linewidth=1.7,
-                    label="목표가",
+            if pd.notna(price):
+                target_prices[quarter] = int(
+                    round(price / 100) * 100
                 )
+            else:
+                target_prices[quarter] = np.nan
 
-                last_index = valid.index[-1]
-                last_value = float(valid.iloc[-1])
-
-                ax.annotate(
-                    f"목표가 {last_value:,.0f}",
-                    xy=(last_index, last_value),
-                    xytext=(-5, 6),
-                    textcoords="offset points",
-                    color="#c45a00",
-                    fontsize=8,
-                    fontweight="bold",
-                    ha="right",
-                    va="bottom",
-                )
-
-        # 이동평균선(MA5/MA20)을 함께 그려 교차 신호를 눈으로 확인할 수 있게 합니다.
-        for column, color, label in (
-            ("MA5", "#f97316", "MA5"),
-            ("MA20", "#7c3aed", "MA20"),
-        ):
-            if column not in df.columns:
-                continue
-
-            values = to_numeric(df[column])
-
-            if values.notna().sum() == 0:
-                continue
-
-            ax.plot(
-                df.index,
-                values,
-                color=color,
-                linewidth=1.7,
-                alpha=0.95,
-                label=label,
-                zorder=4,
-            )
-
-        ChartPlotter.plot_signals(ax, df)
-
-        handles, labels = (
-            ax.get_legend_handles_labels()
-        )
-
-        if handles:
-            ax.legend(
-                handles,
-                labels,
-                loc="upper left",
-                ncol=3,
-                fontsize=7.5,
-                framealpha=0.9,
-            )
-
-        ax.margins(y=0.13)
-
-    # -----------------------------------------------------
-    # 패널 2: 거래량
-    # -----------------------------------------------------
+        return target_prices
 
     @staticmethod
-    def plot_volume_panel(ax, df):
-        set_panel_style(
-            ax,
-            "2. 거래량",
-            "거래량 (주)",
-        )
-
-        colors = np.where(
-            df["종가"] >= df["시가"],
-            "#dc2626",
-            "#2563eb",
-        )
-
-        ax.bar(
-            df.index,
-            df["거래량"],
-            color=colors,
-            alpha=0.7,
-            width=0.7,
-        )
-
-        ax.set_ylim(bottom=0)
-
-    # -----------------------------------------------------
-    # 패널 3: MACD
-    # -----------------------------------------------------
+    def get_quarter(date):
+        """날짜로부터 YYYY.NQ 형식의 분기를 계산합니다."""
+        quarter = (date.month - 1) // 3 + 1
+        return f"{date.year}.{quarter}Q"
 
     @staticmethod
-    def plot_macd_panel(ax, df):
-        set_panel_style(
-            ax,
-            "3. 일간·주간·월간 MACD Oscillator",
-            "MACD\nOscillator",
-        )
-
-        specs = [
-            (
-                "Daily_Oscillator",
-                "일간",
-                "#111827",
-                DAILY_MACD_LINEWIDTH,
-                2,
-            ),
-            (
-                "Weekly_Oscillator",
-                "주간",
-                "#dc2626",
-                WEEKLY_MACD_LINEWIDTH,
-                3,
-            ),
-            (
-                "Monthly_Oscillator",
-                "월간",
-                "#16a34a",
-                MONTHLY_MACD_LINEWIDTH,
-                4,
-            ),
-        ]
-
-        plotted = False
-        x_values = df.index.to_numpy(dtype=float)
-
-        for (
-            column,
-            label,
-            color,
-            linewidth,
-            zorder,
-        ) in specs:
-            if column not in df.columns:
-                continue
-
-            values = (
-                to_numeric(df[column])
-                .to_numpy(dtype=float)
-            )
-
-            valid = np.isfinite(values)
-
-            if not valid.any():
-                continue
-
-            ax.plot(
-                x_values,
-                values,
-                color=color,
-                linewidth=linewidth,
-                label=label,
-                zorder=zorder,
-            )
-
-            ax.fill_between(
-                x_values,
-                values,
-                0,
-                where=valid,
-                color=color,
-                alpha=0.08,
-                zorder=1,
-            )
-
-            plotted = True
-
-        ax.axhline(
-            0,
-            color="#374151",
-            linewidth=0.7,
-            linestyle="--",
-        )
-
-        if plotted:
-            ax.legend(
-                loc="upper left",
-                ncol=3,
-                fontsize=8,
-            )
-        else:
-            panel_message(
-                ax,
-                "MACD 데이터가 없습니다.",
-            )
-
-    # -----------------------------------------------------
-    # 패널 4: 외국인·기관·개인 누적 순매수 수량
-    # -----------------------------------------------------
-
-    @staticmethod
-    def plot_investor_volume_panel(
-        ax,
-        df,
-        cumulative_start,
-    ):
-        set_panel_style(
-            ax,
-            "4. 외국인·기관·개인 누적 순매수 수량"
-            f" — 누적 시작 {cumulative_start}",
-            "누적 순매수 (주)",
-        )
-
-        specs = [
-            (
-                "외국인_누적순매수수량",
-                "외국인",
-                "#dc2626",
-            ),
-            (
-                "기관_누적순매수수량",
-                "기관",
-                "#111827",
-            ),
-            (
-                "개인_누적순매수수량",
-                "개인",
-                "#2563eb",
-            ),
-        ]
-
-        plotted = False
-        incomplete = False
-        valid_dates = []
-
-        for column, label, color in specs:
-            if column not in df.columns:
-                incomplete = True
-                continue
-
-            values = to_numeric(df[column])
-
-            if values.isna().any():
-                incomplete = True
-
-            valid = values.dropna()
-
-            if valid.empty:
-                incomplete = True
-                continue
-
-            last_index = valid.index[-1]
-            last_value = float(valid.iloc[-1])
-
-            valid_dates.append(
-                pd.Timestamp(
-                    df.loc[last_index, "날짜"]
-                )
-            )
-
-            ax.plot(
-                df.index,
-                values,
-                color=color,
-                linewidth=1.8,
-                label=f"{label} {last_value:,.0f}주",
-            )
-
-            plotted = True
-
-        ax.axhline(
-            0,
-            color="#6b7280",
-            linewidth=0.8,
-            linestyle="--",
-        )
-
-        if not plotted:
-            panel_message(
-                ax,
-                "누적 순매수 수량을 표시할 수 없습니다.\n"
-                "투자자 데이터 포함 여부와 조회 누락을 확인하세요.",
-            )
-            return
-
-        ax.legend(
-            loc="upper left",
-            ncol=3,
-            fontsize=8,
-            framealpha=0.9,
-        )
-
-        note = (
-            "표시 시리즈의 공통 유효 종료일: "
-            + min(valid_dates).strftime("%Y-%m-%d")
-        )
-
-        if incomplete:
-            note += " · 일부 데이터 누락"
-
-        ax.text(
-            0.99,
-            0.03,
-            note,
-            transform=ax.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=7.5,
-            color="#6b7280",
-            bbox={
-                "facecolor": "white",
-                "alpha": 0.8,
-                "edgecolor": "none",
-                "pad": 1,
-            },
-        )
-
-        ax.margins(y=0.22)
-
-    # -----------------------------------------------------
-    # 패널 5: 분기 재무
-    # -----------------------------------------------------
-
-    @staticmethod
-    def plot_financial_panel(
-        ax,
-        df,
-        stock_name,
-        excel_file=None,
-    ):
+    def calculate_divergence_rate(current_price, target_price):
         """
-        최근 6개 분기와 엑셀의 미래 분기 재무를 표시합니다.
+        목표가 대비 괴리율을 계산합니다.
 
-        기준일:
-            실제 마지막 가격 데이터 날짜
+        괴리율(%) = (현재가 - 목표가) / 목표가 × 100
 
-        표시 위치:
-            분기 시작월의 첫 가용 날짜
-
-        미래 분기:
-            월~금 기준 표시용 날짜를 추가하여 오른쪽에 배치
-
-        반환값:
-            실제 날짜 + 미래 표시용 날짜의 DatetimeIndex
-
-            재무를 표시할 수 없으면 None을 반환합니다.
+        양수: 현재가가 목표가보다 높음
+        음수: 현재가가 목표가보다 낮음
         """
-        set_panel_style(
-            ax,
-            "5. 분기 재무 — 분기 시작 위치 표시"
-            f" / 최근 {FINANCIAL_QUARTERS}개 분기"
-            " + 엑셀 미래 전망",
-            f"매출액\n({FINANCIAL_UNIT_LABEL})",
-        )
-
-        if df is None or df.empty:
-            panel_message(
-                ax,
-                "표시할 가격 데이터가 없습니다.",
-            )
-            return None
-
         if (
-            not excel_file
-            or not Path(excel_file).is_file()
+            pd.isna(current_price)
+            or pd.isna(target_price)
+            or target_price == 0
         ):
-            panel_message(
-                ax,
-                "재무 엑셀 파일이 없습니다.",
-            )
-            return None
+            return np.nan
 
-        # -------------------------------------------------
-        # 1. 재무 엑셀 읽기
-        # -------------------------------------------------
+        return (
+            (current_price - target_price)
+            / target_price
+            * 100
+        )
+
+    @staticmethod
+    def add_quarter_and_target_price(
+        df,
+        excel_file,
+        sheet_name,
+    ):
+        """
+        분기, 목표가, 괴리율 컬럼을 추가합니다.
+
+        주의(정보 시점):
+        목표가는 '그 분기의 목표주가'를 분기 첫 거래일부터 배정합니다.
+        증권사 목표주가는 보통 그 분기 실적이 나온 뒤에 제시되므로,
+        분기 초반 행은 당시엔 알 수 없던 값을 보여주는 셈입니다.
+        이 값은 신호·수익률 계산에는 쓰이지 않고 화면 참고용으로만
+        쓰입니다. 백테스트 입력으로는 쓰지 마세요.
+        """
+        df = df.copy()
+
+        target_prices = FinancialDataManager.load_target_price(
+            excel_file,
+            sheet_name,
+        )
+
+        df["분기"] = df.index.map(
+            FinancialDataManager.get_quarter
+        )
+
+        df["목표가"] = df["분기"].map(target_prices)
+
+        # 목표가가 0인 경우 괴리율은 NaN으로 처리합니다.
+        valid_target = df["목표가"].where(
+            df["목표가"].ne(0)
+        )
+
+        df["괴리율(%)"] = (
+            (df["종가"] - valid_target)
+            / valid_target
+            * 100
+        )
+
+        return df
+
+
+# =========================================================
+# 기술적 지표
+# =========================================================
+
+# 매매 비용 (왕복): 수수료 + 거래세 + 슬리피지 가정
+TRADING_COST_RATE = 0.003      # 0.3% (비율)
+TRADING_COST_PCT = 0.30        # 0.3% (퍼센트 포인트)
+
+
+class TechnicalIndicator:
+    """기술적 지표 계산 클래스"""
+
+    @staticmethod
+    def ema(series, span=12):
+        """지수이동평균을 계산합니다."""
+        return series.ewm(
+            span=span,
+            adjust=False,
+        ).mean()
+
+    @staticmethod
+    def macd(
+        df,
+        price_col="종가",
+        timeframe="daily",
+        fast=None,
+        slow=None,
+        signal=None,
+    ):
+        """시간 단위별 MACD를 계산합니다."""
+        df = df.copy()
+
+        timeframe_params = {
+            "daily": {
+                "fast": 12,
+                "slow": 26,
+                "signal": 9,
+            },
+            "weekly": {
+                "fast": 5,
+                "slow": 13,
+                "signal": 5,
+            },
+            "monthly": {
+                "fast": 3,
+                "slow": 7,
+                "signal": 3,
+            },
+        }
+
+        timeframe_str = str(timeframe).lower()
+
+        defaults = timeframe_params.get(
+            timeframe_str,
+            timeframe_params["daily"],
+        )
+
+        fast = defaults["fast"] if fast is None else fast
+        slow = defaults["slow"] if slow is None else slow
+        signal = (
+            defaults["signal"]
+            if signal is None
+            else signal
+        )
+
+        ema_fast = TechnicalIndicator.ema(
+            df[price_col],
+            fast,
+        )
+
+        ema_slow = TechnicalIndicator.ema(
+            df[price_col],
+            slow,
+        )
+
+        df["MACD"] = ema_fast - ema_slow
+
+        df["Signal"] = TechnicalIndicator.ema(
+            df["MACD"],
+            signal,
+        )
+
+        df["Oscillator"] = (
+            df["MACD"] - df["Signal"]
+        )
+
+        return df
+
+    @staticmethod
+    def add_daily_macd(df):
+        """일간 MACD를 추가합니다."""
+        df = TechnicalIndicator.macd(
+            df,
+            timeframe="daily",
+        )
+
+        return df.rename(
+            columns={
+                "MACD": "Daily_MACD",
+                "Signal": "Daily_Signal",
+                "Oscillator": "Daily_Oscillator",
+            }
+        )
+
+    @staticmethod
+    def add_weekly_macd(df):
+        """
+        주간 MACD를 추가합니다.
+
+        각 주의 날짜에는 '직전에 완료된 주봉'으로 계산한 값을
+        배정합니다. 그 주 자체의 금요일 종가는 쓰지 않으므로
+        주 초반에 미래 정보가 섞이지 않습니다.
+
+        표시값(Weekly_MACD 등)과 신호 판정이 같은 값을 쓰도록
+        여기서 한 칸 밀어(shift) 배정합니다.
+        """
+        weekly = (
+            df[["종가"]]
+            .resample("W-FRI")
+            .last()
+        )
+
+        weekly = TechnicalIndicator.macd(
+            weekly,
+            timeframe="weekly",
+        )
+
+        weekly = weekly.rename(
+            columns={
+                "MACD": "Weekly_MACD",
+                "Signal": "Weekly_Signal",
+                "Oscillator": "Weekly_Oscillator",
+            }
+        )
+
+        columns = [
+            "Weekly_MACD",
+            "Weekly_Signal",
+            "Weekly_Oscillator",
+        ]
+
+        weekly = weekly[columns].copy()
+
+        # 완료된 주봉만 배정합니다. shift(1)을 하지 않으면 그 주 금요일
+        # 종가로 계산한 값이 같은 주 월~목요일에 이미 붙어 미래정보가 됩니다.
+        weekly[columns] = weekly[columns].shift(1)
+        weekly.index = weekly.index.to_period("W-FRI")
+
+        result = df.copy()
+
+        # map을 사용해 원래 일봉 인덱스를 유지합니다.
+        periods = result.index.to_period("W-FRI")
+
+        for column in columns:
+            result[column] = periods.map(weekly[column])
+
+        return result
+
+    @staticmethod
+    def add_monthly_macd(df):
+        """
+        월간 MACD를 추가합니다.
+
+        각 월의 날짜에는 '직전에 완료된 월봉'으로 계산한 값을
+        배정합니다. 그 달 자체의 월말 종가는 쓰지 않으므로
+        월 초반에 미래 정보가 섞이지 않습니다.
+        """
+        monthly = (
+            df[["종가"]]
+            .resample("ME")
+            .last()
+        )
+
+        monthly = TechnicalIndicator.macd(
+            monthly,
+            timeframe="monthly",
+        )
+
+        monthly = monthly.rename(
+            columns={
+                "MACD": "Monthly_MACD",
+                "Signal": "Monthly_Signal",
+                "Oscillator": "Monthly_Oscillator",
+            }
+        )
+
+        columns = [
+            "Monthly_MACD",
+            "Monthly_Signal",
+            "Monthly_Oscillator",
+        ]
+
+        monthly = monthly[columns].copy()
+
+        # 완료된 월봉만 배정합니다(주간과 같은 이유).
+        monthly[columns] = monthly[columns].shift(1)
+        monthly.index = monthly.index.to_period("M")
+
+        result = df.copy()
+        periods = result.index.to_period("M")
+
+        for column in columns:
+            result[column] = periods.map(monthly[column])
+
+        return result
+
+
+# =========================================================
+# 매매 신호
+# =========================================================
+
+class SignalGenerator:
+    """매매 신호 생성 클래스"""
+
+    @staticmethod
+    def calculate_trend(osc_series):
+        """
+        Oscillator 변화 방향을 계산합니다.
+
+         1: 증가
+        -1: 감소
+         0: 변화 없음
+        """
+        trend = pd.Series(
+            0,
+            index=osc_series.index,
+            dtype=int,
+        )
+
+        diff = osc_series.diff()
+
+        trend.loc[diff > 0] = 1
+        trend.loc[diff < 0] = -1
+
+        return trend
+
+    @staticmethod
+    def completed_period_trend(
+        df,
+        oscillator_col,
+        freq,
+        label,
+    ):
+        """
+        '직전에 확정된' 주봉·월봉 MACD만 사용해 추세를 배정합니다.
+
+        기존 방식은 해당 주(월)의 마지막 가용 종가로 계산한 오실레이터를
+        그 주(월)의 첫 거래일에 이미 배정했습니다. 그래서 금요일에야
+        확정되는 주봉 값이 월요일에 신호로 찍히는 미래정보(look-ahead)가
+        있었습니다.
+
+        여기서는 각 주(월)의 확정 오실레이터 변화(+1/-1/0)를 한 칸 뒤로
+        밀어, 다음 주(월) 첫 거래일부터 반영합니다. 신호는 실제로 값을
+        알 수 있는 시점에만 발생합니다.
+        """
+        df = df.copy()
+
+        periods = df.index.to_period(freq)
+
+        per_period = (
+            df[oscillator_col]
+            .groupby(periods)
+            .last()
+        )
+
+        trend = SignalGenerator.calculate_trend(per_period)
+
+        # 오실레이터는 add_weekly_macd/add_monthly_macd에서 이미
+        # '직전 완료 봉' 기준으로 한 칸 밀려 있으므로 여기서 또 밀지
+        # 않습니다(두 번 밀면 신호가 한 주기 늦어집니다).
+        known = trend
+
+        df[label] = (
+            known.reindex(periods)
+            .fillna(0)
+            .astype(int)
+            .to_numpy()
+        )
+
+        return df
+
+    @staticmethod
+    def maintain_weekly_trend(df):
+        """주간 추세를 '직전 완료 주봉' 기준으로 해당 주 전체에 배정합니다."""
+        return SignalGenerator.completed_period_trend(
+            df,
+            "Weekly_Oscillator",
+            "W-FRI",
+            "Weekly_Trend",
+        )
+
+    @staticmethod
+    def maintain_monthly_trend(df):
+        """월간 추세를 '직전 완료 월봉' 기준으로 해당 월 전체에 배정합니다."""
+        return SignalGenerator.completed_period_trend(
+            df,
+            "Monthly_Oscillator",
+            "M",
+            "Monthly_Trend",
+        )
+
+    @staticmethod
+    def identify_signal_changes(trend_series):
+        """
+        엄격한 추세 전환을 감지합니다.
+
+        매수: -1 → +1
+        매도: +1 → -1
+
+        0을 거치는 전환은 신호로 인정하지 않습니다.
+        """
+        previous = trend_series.shift(1)
+
+        buy = (
+            (previous == -1)
+            & (trend_series == 1)
+        )
+
+        sell = (
+            (previous == 1)
+            & (trend_series == -1)
+        )
+
+        return buy, sell
+
+    @staticmethod
+    def enforce_signal_pairing(buy, sell):
+        """
+        매수·매도 신호가 번갈아 짝을 이루도록 정리합니다.
+
+        - 직전 신호와 같은 종류의 신호는 무시합니다.
+          (동일한 매수·매도 신호가 계속 발생하는 것을 제거)
+        - 매수 뒤에는 매도, 매도 뒤에는 매수만 올 수 있습니다.
+        - 첫 신호는 매수·매도 어느 쪽이든 허용합니다.
+          (첫 신호가 매도여도 백테스트는 포지션이 없어 무시합니다.)
+        - 같은 날 매수와 매도가 겹치면 방향을 판단할 수 없으므로
+          두 신호 모두 제거합니다.
+        """
+        paired_buy = buy.copy()
+        paired_sell = sell.copy()
+
+        #  0: 신호 없음,  1: 직전 신호가 매수,  -1: 직전 신호가 매도
+        last_signal = 0
+
+        for timestamp in buy.index:
+            day_buy = bool(buy.loc[timestamp])
+            day_sell = bool(sell.loc[timestamp])
+
+            if day_buy and day_sell:
+                paired_buy.loc[timestamp] = False
+                paired_sell.loc[timestamp] = False
+                continue
+
+            if day_buy:
+                if last_signal == 1:
+                    # 동일한 매수 신호는 무시합니다.
+                    paired_buy.loc[timestamp] = False
+                else:
+                    last_signal = 1
+            elif day_sell:
+                if last_signal == -1:
+                    # 동일한 매도 신호는 무시합니다.
+                    paired_sell.loc[timestamp] = False
+                else:
+                    last_signal = -1
+
+        return paired_buy, paired_sell
+
+    @staticmethod
+    def expand_turn_window(turn):
+        """
+        월간 전환 조건을 전환일부터 그 달의 마지막 날까지
+        앞쪽 방향으로만 확장합니다.
+
+        다음 달이 되면 창을 초기화하며, 전환이 없던 달은
+        조건 구간이 아닙니다.
+        """
+        window = pd.Series(False, index=turn.index)
+
+        active_month = None
+        active = False
+
+        for timestamp in turn.index:
+            month = timestamp.to_period("M")
+
+            if month != active_month:
+                active_month = month
+                active = False
+
+            if turn.loc[timestamp]:
+                active = True
+
+            window.loc[timestamp] = active
+
+        return window
+
+    @staticmethod
+    def identify_weekly_monthly_signals(df):
+        """
+        주간 추세와 월간 추세 전환을 결합합니다.
+
+        매수:
+        - 월간 추세가 감소(-1)하다가 증가(+1)로 전환한 달에서
+        - 주간 추세가 전주보다 증가(+1)할 때
+
+        매도:
+        - 월간 추세가 증가(+1)하다가 감소(-1)로 전환한 달에서
+        - 주간 추세가 전주보다 감소(-1)할 때
+
+        월간 전환은 전환일부터 그 달의 마지막 날까지 조건 구간으로
+        유지하므로, 같은 구간 안에서 주간 추세가 증가 조건을
+        여러 번 충족해도 첫 신호만 인정합니다
+        (동일 신호 반복 무시).
+
+        또한 매수와 매도가 번갈아 짝을 이루도록 정리합니다.
+        """
+        previous_monthly = df["Monthly_Trend"].shift(1)
+
+        turn_up = (
+            (previous_monthly == -1)
+            & (df["Monthly_Trend"] == 1)
+        )
+
+        turn_down = (
+            (previous_monthly == 1)
+            & (df["Monthly_Trend"] == -1)
+        )
+
+        buy_window = SignalGenerator.expand_turn_window(turn_up)
+        sell_window = SignalGenerator.expand_turn_window(turn_down)
+
+        buy = (
+            buy_window
+            & (df["Weekly_Trend"] == 1)
+        )
+
+        sell = (
+            sell_window
+            & (df["Weekly_Trend"] == -1)
+        )
+
+        return SignalGenerator.enforce_signal_pairing(
+            buy,
+            sell,
+        )
+
+    @staticmethod
+    def add_signals(df):
+        """일간·주간·월간·결합 신호를 추가합니다."""
+        df = df.copy()
+
+        for prefix in ("Daily", "Weekly", "Monthly"):
+            df[f"{prefix}_Trend"] = (
+                SignalGenerator.calculate_trend(
+                    df[f"{prefix}_Oscillator"]
+                )
+            )
+
+        df = SignalGenerator.maintain_weekly_trend(df)
+        df = SignalGenerator.maintain_monthly_trend(df)
+
+        for prefix in ("Daily", "Weekly", "Monthly"):
+            buy, sell = (
+                SignalGenerator.identify_signal_changes(
+                    df[f"{prefix}_Trend"]
+                )
+            )
+
+            df[f"{prefix}_Buy"] = buy.astype(int)
+            df[f"{prefix}_Sell"] = sell.astype(int)
+
+        combined_buy, combined_sell = (
+            SignalGenerator.identify_weekly_monthly_signals(df)
+        )
+
+        df["Weekly_Monthly_Buy"] = (
+            combined_buy.astype(int)
+        )
+
+        df["Weekly_Monthly_Sell"] = (
+            combined_sell.astype(int)
+        )
+
+        return df
+
+
+# =========================================================
+# 백테스트
+# =========================================================
+
+class Backtester:
+    """기존 신호 기반 백테스트"""
+
+    @staticmethod
+    def backtest(
+        df,
+        signal_type="Weekly",
+        monthly_filter=None,
+        price_col="종가",
+        execution="next_open",
+        cost=TRADING_COST_PCT,
+        buy_col=None,
+        sell_col=None,
+    ):
+        """
+        신호 다음 거래일 시가로 매수·매도합니다.
+
+        신호는 그날 '종가'가 확정된 뒤에야 알 수 있으므로, 종가에
+        체결하는 것은 실제로 주문할 수 없는 시점입니다(반나절 빠른
+        낙관 편향). 기본값(execution="next_open")은 다음 거래일
+        시가에 체결합니다. execution="close"로 두면 옛 방식대로
+        신호일 종가에 체결합니다.
+
+        비용:
+        - 수익률에서 왕복 비용(cost, 기본 0.3%p)을 차감합니다.
+        - cost=0 으로 두면 비용 없는 옛 계산과 같습니다.
+
+        유지되는 규칙:
+        - 한 번에 한 포지션만 보유
+        - 미청산 포지션은 거래 내역에서 제외
+        """
+        df = df.copy()
+        trades = []
+
+        # 체결 좌표(체결일, 체결가)를 미리 계산합니다.
+        # next_open: 신호일 '다음' 거래일 시가 / close: 신호일 종가
+        bars = []
+        open_price = (
+            pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+            if "시가" in df.columns
+            else np.full(len(df), np.nan)
+        )
+        close_price = pd.to_numeric(
+            df[price_col], errors="coerce"
+        ).to_numpy(dtype=float)
+
+        for index in range(len(df)):
+            if execution == "next_open":
+                following = index + 1
+                if (
+                    following < len(df)
+                    and np.isfinite(open_price[following])
+                    and open_price[following] > 0
+                ):
+                    bars.append((df.index[following], float(open_price[following])))
+                else:
+                    bars.append((None, None))
+            elif np.isfinite(close_price[index]) and close_price[index] > 0:
+                bars.append((df.index[index], float(close_price[index])))
+            else:
+                bars.append((None, None))
+
+        # 신호 컬럼 이름을 직접 넘기면 그 컬럼을 씁니다.
+        # (이동평균처럼 'X_Buy' 규칙을 따르지 않는 신호용)
+        buy_col = buy_col or f"{signal_type}_Buy"
+        sell_col = sell_col or f"{signal_type}_Sell"
+
+        in_position = False
+        entry_date = None
+        entry_price = None
+
+        def make_trade(
+            exit_date,
+            exit_price,
+            reason,
+        ):
+            # 매수일의 분기 목표가(엑셀 기준)를 함께 남깁니다.
+            target_price = None
+
+            if "목표가" in df.columns:
+                try:
+                    candidate = df.at[entry_date, "목표가"]
+                    target_price = float(candidate)
+                except (KeyError, TypeError, ValueError):
+                    target_price = None
+
+            gross_rate = (
+                (exit_price - entry_price)
+                / entry_price
+                * 100
+            )
+
+            # 왕복 비용(수수료·세금·슬리피지)을 차감합니다.
+            profit_rate = gross_rate - cost
+            cost_amount = entry_price * (cost / 100.0)
+
+            return {
+                "전략": (
+                    f"{signal_type} "
+                    f"(Monthly={monthly_filter})"
+                ),
+                "매수일": entry_date,
+                "매수가": round(entry_price, 0),
+                "목표가": (
+                    round(float(target_price), 0)
+                    if target_price is not None
+                    and np.isfinite(target_price)
+                    else None
+                ),
+                "매도일": exit_date,
+                "매도가": round(exit_price, 0),
+                "수익률(%)": round(profit_rate, 2),
+                "수익(원)": round(
+                    exit_price - entry_price - cost_amount,
+                    0,
+                ),
+                "보유기간(일)": (
+                    exit_date - entry_date
+                ).days,
+                "청산사유": reason,
+            }
+
+        for index in range(len(df)):
+            exec_date, exec_price = bars[index]
+
+            if monthly_filter is not None:
+                current_monthly = (
+                    df["Monthly_Trend"].iloc[index]
+                )
+
+                if current_monthly != monthly_filter:
+                    if (
+                        in_position
+                        and exec_date is not None
+                        and exec_date > entry_date
+                    ):
+                        trades.append(
+                            make_trade(
+                                exec_date,
+                                exec_price,
+                                "Monthly_Trend 변화",
+                            )
+                        )
+
+                        in_position = False
+
+                    continue
+
+            if (
+                df[buy_col].iloc[index] == 1
+                and not in_position
+            ):
+                if exec_date is None:
+                    continue
+
+                entry_date = exec_date
+                entry_price = exec_price
+                in_position = True
+
+            elif (
+                df[sell_col].iloc[index] == 1
+                and in_position
+            ):
+                if exec_date is None or exec_date <= entry_date:
+                    continue
+
+                trades.append(
+                    make_trade(
+                        exec_date,
+                        exec_price,
+                        "신호",
+                    )
+                )
+
+                in_position = False
+
+        return pd.DataFrame(trades)
+
+    @staticmethod
+    def calculate_metrics(trades_df, strategy_name):
+        """
+        성과 지표를 계산합니다.
+
+        기존 계산 방식 유지:
+        - 총수익률은 거래별 수익률의 단순 합계
+        - 손익비는 기존 코드의 순수익 / 총손실 절댓값 방식
+        """
+        if trades_df.empty:
+            return {
+                "전략": strategy_name,
+                "총거래수": 0,
+                "승리": 0,
+                "패배": 0,
+                "중립": 0,
+                "승률(%)": 0,
+                "평균수익(%)": 0,
+                "평균손실(%)": 0,
+                "총수익률(%)": 0,
+                "누적수익(원)": 0,
+                "최대수익(%)": 0,
+                "최대손실(%)": 0,
+                "손익비": 0,
+                "평균보유기간(일)": 0,
+            }
+
+        win = trades_df.loc[
+            trades_df["수익률(%)"] > 0
+        ]
+
+        loss = trades_df.loc[
+            trades_df["수익률(%)"] < 0
+        ]
+
+        total_profit = trades_df["수익(원)"].sum()
+        total_loss = loss["수익(원)"].sum()
+
+        profit_factor = (
+            abs(total_profit / total_loss)
+            if total_loss != 0
+            else 0
+        )
+
+        count = len(trades_df)
+
+        return {
+            "전략": strategy_name,
+            "총거래수": count,
+            "승리": len(win),
+            "패배": len(loss),
+            "중립": count - len(win) - len(loss),
+            "승률(%)": round(
+                len(win) / count * 100,
+                1,
+            ),
+            "평균수익(%)": (
+                round(win["수익률(%)"].mean(), 1)
+                if not win.empty
+                else 0
+            ),
+            "평균손실(%)": (
+                round(loss["수익률(%)"].mean(), 1)
+                if not loss.empty
+                else 0
+            ),
+            "총수익률(%)": round(
+                trades_df["수익률(%)"].sum(),
+                1,
+            ),
+            "누적수익(원)": round(
+                total_profit,
+                0,
+            ),
+            "최대수익(%)": round(
+                trades_df["수익률(%)"].max(),
+                1,
+            ),
+            "최대손실(%)": round(
+                trades_df["수익률(%)"].min(),
+                1,
+            ),
+            "손익비": round(profit_factor, 1),
+            "평균보유기간(일)": round(
+                trades_df["보유기간(일)"].mean(),
+                1,
+            ),
+        }
+
+
+# =========================================================
+# 신호 조회
+# =========================================================
+
+def classify_signal(
+    row,
+    buy_col="Weekly_Buy",
+    sell_col="Weekly_Sell",
+):
+    """단일 행의 매수·매도 신호를 반환합니다."""
+    if row.get(buy_col, 0) == 1:
+        return "매수"
+
+    if row.get(sell_col, 0) == 1:
+        return "매도"
+
+    return "신호 없음"
+
+
+def get_recent_signal(
+    df,
+    buy_col="Weekly_Buy",
+    sell_col="Weekly_Sell",
+    days=7,
+    reference_date=None,
+):
+    """
+    기준일 포함 최근 days일 안의 마지막 신호를 반환합니다.
+
+    days는 거래일 수가 아닌 달력일 수입니다.
+
+    reference_date가 없으면 데이터의 마지막 날짜를 사용합니다.
+    """
+    empty_result = {
+        "신호": "신호 없음",
+        "발생일": None,
+    }
+
+    if days < 1:
+        raise ValueError("신호 조회 일수는 1 이상이어야 합니다.")
+
+    if df.empty:
+        return empty_result
+
+    missing = {buy_col, sell_col} - set(df.columns)
+
+    if missing:
+        raise ValueError(
+            "신호 컬럼 누락: "
+            + ", ".join(sorted(missing))
+        )
+
+    if reference_date is None:
+        reference_date = df.index.max()
+
+    reference = pd.Timestamp(reference_date).normalize()
+    start_date = reference - pd.Timedelta(days=days - 1)
+
+    # 기준일의 모든 시간대를 포함하도록 날짜 단위로 비교합니다.
+    dates = df.index.normalize()
+
+    date_mask = (
+        (dates >= start_date)
+        & (dates <= reference)
+    )
+
+    signal_mask = (
+        df[buy_col].eq(1)
+        | df[sell_col].eq(1)
+    )
+
+    recent = (
+        df.loc[date_mask & signal_mask]
+        .sort_index()
+    )
+
+    if recent.empty:
+        return empty_result
+
+    last_row = recent.iloc[-1]
+
+    return {
+        "신호": classify_signal(
+            last_row,
+            buy_col,
+            sell_col,
+        ),
+        "발생일": recent.index[-1].strftime("%Y-%m-%d"),
+    }
+
+
+def recent_signals(df, combined=False, limit=10):
+    """
+    최근 매매 신호 표를 반환합니다.
+
+    기존 app.py와의 호환성을 위해 날짜 오름차순으로 반환합니다.
+    최근 7일로 제한하지 않고 전체 분석 기간에서 limit개를 조회합니다.
+    """
+    prefix = (
+        "Weekly_Monthly"
+        if combined
+        else "Weekly"
+    )
+
+    buy_col = f"{prefix}_Buy"
+    sell_col = f"{prefix}_Sell"
+
+    empty_columns = [
+        "날짜",
+        "종가",
+        "목표가",
+        "괴리율(%)",
+        "신호",
+        "Daily_Trend",
+        "Weekly_Trend",
+        "Monthly_Trend",
+    ]
+
+    if limit < 1 or df.empty:
+        return pd.DataFrame(columns=empty_columns)
+
+    mask = (
+        df[buy_col].eq(1)
+        | df[sell_col].eq(1)
+    )
+
+    result = (
+        df.loc[mask]
+        .sort_index()
+        .tail(limit)
+        .copy()
+    )
+
+    if result.empty:
+        return pd.DataFrame(columns=empty_columns)
+
+    result["날짜"] = result.index.strftime("%Y-%m-%d")
+
+    result["신호"] = result.apply(
+        lambda row: classify_signal(
+            row,
+            buy_col,
+            sell_col,
+        ),
+        axis=1,
+    )
+
+    columns = [
+        column
+        for column in empty_columns
+        if column in result.columns
+    ]
+
+    return result[columns].reset_index(drop=True)
+
+
+# =========================================================
+# 입력 검증
+# =========================================================
+
+def validate_excel(excel_file, stock_name):
+    """재무 엑셀의 시트와 필수 컬럼을 검증합니다."""
+    with pd.ExcelFile(excel_file) as book:
+        if stock_name not in book.sheet_names:
+            raise ValueError(
+                f"엑셀에 '{stock_name}' 시트가 없습니다. "
+                f"현재 시트: {', '.join(book.sheet_names)}"
+            )
 
         financial = pd.read_excel(
-            excel_file,
+            book,
             sheet_name=stock_name,
         )
 
-        financial.columns = [
-            str(column).strip()
-            for column in financial.columns
-        ]
+    required = {
+        "분기",
+        "목표가",
+        "영업이익",
+    }
 
-        if financial.columns.duplicated().any():
+    missing = required - set(financial.columns)
+
+    if missing:
+        raise ValueError(
+            "엑셀에 필요한 컬럼이 없습니다: "
+            + ", ".join(sorted(missing))
+        )
+
+    if financial.empty:
+        raise ValueError("재무 엑셀에 데이터가 없습니다.")
+
+    quarters = (
+        financial["분기"]
+        .astype(str)
+        .str.strip()
+    )
+
+    valid_quarters = quarters.str.fullmatch(
+        r"\d{4}\.[1-4]Q"
+    )
+
+    if not valid_quarters.all():
+        raise ValueError(
+            "분기는 '2026.1Q' 형식으로 입력하세요."
+        )
+
+    if quarters.duplicated().any():
+        raise ValueError(
+            "엑셀에 중복된 분기가 있습니다."
+        )
+
+    for column in ("목표가", "영업이익"):
+        numeric = pd.to_numeric(
+            financial[column],
+            errors="coerce",
+        )
+
+        invalid = (
+            financial[column].notna()
+            & numeric.isna()
+        )
+
+        if invalid.any():
             raise ValueError(
-                "재무 엑셀에 중복된 컬럼이 있습니다."
+                f"'{column}'에는 숫자 또는 빈칸만 입력하세요."
             )
 
-        required = {
-            "분기",
-            "매출액",
-            "영업이익",
-            "순이익",
-        }
 
-        missing = required - set(financial.columns)
+def prepare_price_frame(frame):
+    """가격 데이터의 인덱스와 숫자형 컬럼을 정리합니다."""
+    if frame is None or frame.empty:
+        raise ValueError("가격 데이터가 없습니다.")
 
-        if missing:
+    df = frame.copy()
+
+    required = {
+        "시가",
+        "고가",
+        "저가",
+        "종가",
+        "거래량",
+    }
+
+    missing = required - set(df.columns)
+
+    if missing:
+        raise ValueError(
+            "가격 데이터 컬럼 누락: "
+            + ", ".join(sorted(missing))
+        )
+
+    # 숫자형 인덱스를 날짜로 오인하지 않도록 차단합니다.
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if pd.api.types.is_numeric_dtype(df.index.dtype):
             raise ValueError(
-                "재무 컬럼 누락: "
-                + ", ".join(sorted(missing))
+                "가격 데이터 인덱스는 날짜 형식이어야 합니다."
             )
 
-        financial = (
-            financial
-            .dropna(how="all")
-            .copy()
+        df.index = pd.to_datetime(
+            df.index,
+            errors="coerce",
         )
 
-        if financial.empty:
-            raise ValueError(
-                "재무 엑셀에 데이터가 없습니다."
-            )
+    df = df.loc[~df.index.isna()].copy()
 
-        financial["분기"] = (
-            financial["분기"]
-            .astype("string")
-            .str.strip()
+    # 시간대가 있으면 한국 시간으로 맞춘 뒤 제거합니다.
+    if df.index.tz is not None:
+        df.index = (
+            df.index
+            .tz_convert("Asia/Seoul")
+            .tz_localize(None)
         )
 
-        valid_quarters = (
-            financial["분기"]
-            .str.fullmatch(
-                r"\d{4}\.[1-4]Q",
-                na=False,
-            )
-        )
+    df.index = df.index.normalize()
+    df = df.sort_index()
 
-        if not valid_quarters.all():
-            raise ValueError(
-                "분기는 YYYY.NQ 형식이어야 합니다."
-            )
-
-        if financial["분기"].duplicated().any():
-            raise ValueError(
-                "재무 엑셀에 중복된 분기가 있습니다."
-            )
-
-        value_columns = [
-            "매출액",
-            "영업이익",
-            "순이익",
-        ]
-
-        for column in value_columns:
-            original = financial[column]
-            converted = to_numeric(original)
-
-            supplied = (
-                original.notna()
-                & original.astype("string")
-                .str.strip()
-                .ne("")
-                .fillna(False)
-            )
-
-            if (
-                supplied & converted.isna()
-            ).any():
-                raise ValueError(
-                    f"'{column}'에는 "
-                    "숫자 또는 빈칸만 입력하세요."
-                )
-
-            financial[column] = converted
-
-        period_labels = (
-            financial["분기"]
-            .str.replace(
-                r"^(\d{4})\.([1-4])Q$",
-                r"\1Q\2",
-                regex=True,
-            )
-        )
-
-        financial["_period"] = pd.PeriodIndex(
-            period_labels.to_numpy(),
-            freq="Q-DEC",
-        )
-
-        # -------------------------------------------------
-        # 2. 실제 가격 날짜와 기준일
-        # -------------------------------------------------
-
-        actual_dates = pd.DatetimeIndex(
-            pd.to_datetime(
-                df["날짜"],
-                errors="coerce",
-            )
-        )
-
-        if actual_dates.tz is not None:
-            actual_dates = (
-                actual_dates
-                .tz_convert("Asia/Seoul")
-                .tz_localize(None)
-            )
-
-        actual_dates = actual_dates.normalize()
-
-        if (
-            actual_dates.isna().any()
-            or not actual_dates.is_monotonic_increasing
-            or actual_dates.has_duplicates
-        ):
-            raise ValueError(
-                "차트 날짜는 결측·중복 없이 "
-                "오름차순이어야 합니다."
-            )
-
-        reference_date = actual_dates[-1]
-
-        cutoff = (
-            reference_date
-            - pd.DateOffset(months=DISPLAY_MONTHS)
-        )
-
-        current_period = (
-            reference_date.to_period("Q-DEC")
-        )
-
-        # 현재 분기를 포함한 최근 6개 분기
-        historical_periods = pd.period_range(
-            end=current_period,
-            periods=FINANCIAL_QUARTERS,
-            freq="Q-DEC",
-        )
-
-        # 숫자가 하나 이상 입력된 미래 분기만 대상으로 합니다.
-        has_financial_values = (
-            financial[value_columns]
-            .notna()
-            .any(axis=1)
-        )
-
-        future_periods = pd.PeriodIndex(
-            financial.loc[
-                (
-                    financial["_period"]
-                    > current_period
-                )
-                & has_financial_values,
-                "_period",
-            ],
-            freq="Q-DEC",
-        ).sort_values()
-
-        if len(future_periods):
-            # 중간 누락 분기도 유지하여
-            # 누락 분기를 건너뛰어 선을 잇지 않습니다.
-            allowed_periods = pd.period_range(
-                start=historical_periods[0],
-                end=future_periods[-1],
-                freq="Q-DEC",
-            )
-        else:
-            allowed_periods = historical_periods
-
-        financial = (
-            financial
-            .set_index("_period")
-            .reindex(allowed_periods)
-            .rename_axis("_period")
-            .reset_index()
-        )
-
-        periods = pd.PeriodIndex(
-            financial["_period"],
-            freq="Q-DEC",
-        )
-
-        financial["분기"] = [
-            f"{period.year}.{period.quarter}Q"
-            for period in periods
-        ]
-
-        financial["_quarter_start"] = (
-            periods.start_time.normalize()
-        )
-
-        financial["_quarter_end"] = (
-            periods.end_time.normalize()
-        )
-
-        # 반드시 실제 마지막 가격 날짜를 기준으로 판단합니다.
-        financial["_estimated"] = (
-            financial["_quarter_end"]
-            > reference_date
-        )
-
-        financial = financial.loc[
-            financial["_quarter_start"].ge(cutoff)
+    if df.index.has_duplicates:
+        df = df.loc[
+            ~df.index.duplicated(keep="last")
         ].copy()
 
-        financial = (
-            financial
-            .sort_values("_quarter_start")
-            .reset_index(drop=True)
+    for column in required:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
         )
 
-        if financial.empty:
-            panel_message(
-                ax,
-                "표시할 분기 재무가 없습니다.",
-            )
-            return None
+    df[list(required)] = (
+        df[list(required)]
+        .replace([np.inf, -np.inf], np.nan)
+    )
 
-        # -------------------------------------------------
-        # 3. 미래 분기 표시용 날짜 축 확장
-        # -------------------------------------------------
+    df = df.dropna(subset=list(required))
+    df = df.loc[df["종가"] > 0].copy()
 
-        axis_dates = actual_dates
-
-        if len(future_periods):
-            last_future_start = (
-                future_periods[-1]
-                .start_time
-                .normalize()
-            )
-
-            # 분기 시작일이 주말이면 다음 월~금 날짜에 배치합니다.
-            future_display_end = pd.bdate_range(
-                start=last_future_start,
-                periods=1,
-            )[0]
-
-            if future_display_end > reference_date:
-                extension_dates = pd.bdate_range(
-                    start=(
-                        reference_date
-                        + pd.Timedelta(days=1)
-                    ),
-                    end=future_display_end,
-                )
-
-                axis_dates = actual_dates.append(
-                    extension_dates
-                )
-
-        # -------------------------------------------------
-        # 4. 분기 시작일을 공통 X축 위치로 변환
-        # -------------------------------------------------
-
-        positions = axis_dates.searchsorted(
-            pd.DatetimeIndex(
-                financial["_quarter_start"]
-            ),
-            side="left",
+    if df.empty:
+        raise ValueError(
+            "유효한 가격 데이터가 없습니다."
         )
 
-        valid_positions = (
-            positions < len(axis_dates)
-        )
+    df["날짜"] = df.index.strftime("%Y-%m-%d")
 
-        financial = (
-            financial.loc[valid_positions]
-            .reset_index(drop=True)
-        )
-
-        positions = positions[valid_positions]
-
-        if financial.empty:
-            panel_message(
-                ax,
-                "날짜 축과 겹치는 분기가 없습니다.",
-            )
-            return None
-
-        mapped_dates = axis_dates.take(
-            positions
-        )
-
-        mapped_periods = (
-            mapped_dates.to_period("Q-DEC")
-        )
-
-        financial_periods = pd.PeriodIndex(
-            financial["_period"],
-            freq="Q-DEC",
-        )
-
-        same_quarter = np.asarray(
-            mapped_periods == financial_periods
-        )
-
-        # 과거 분기 시작월 데이터가 없으면
-        # 다른 월로 밀어서 표시하지 않습니다.
-        same_start_month = np.asarray(
-            mapped_dates.month
-            == pd.DatetimeIndex(
-                financial["_quarter_start"]
-            ).month
-        )
-
-        valid_mapping = (
-            same_quarter & same_start_month
-        )
-
-        financial = (
-            financial.loc[valid_mapping]
-            .reset_index(drop=True)
-        )
-
-        positions = (
-            positions[valid_mapping]
-            .astype(float)
-        )
-
-        if financial.empty:
-            panel_message(
-                ax,
-                "분기 시작월에 대응하는 "
-                "날짜 데이터가 없습니다.",
-            )
-            return None
-
-        revenue = financial[
-            "매출액"
-        ].to_numpy(dtype=float)
-
-        operating = financial[
-            "영업이익"
-        ].to_numpy(dtype=float)
-
-        net_income = financial[
-            "순이익"
-        ].to_numpy(dtype=float)
-
-        estimated = financial[
-            "_estimated"
-        ].to_numpy(dtype=bool)
-
-        quarter_ordinals = np.array(
-            [
-                period.ordinal
-                for period in financial["_period"]
-            ],
-            dtype=np.int64,
-        )
-
-        all_values = np.concatenate([
-            revenue,
-            operating,
-            net_income,
-        ])
-
-        if not np.isfinite(all_values).any():
-            panel_message(
-                ax,
-                "표시할 재무 숫자 데이터가 없습니다.",
-            )
-            return None
-
-        # -------------------------------------------------
-        # 5. 매출액 막대
-        # -------------------------------------------------
-
-        if len(positions) >= 2:
-            positive_gaps = np.diff(positions)
-            positive_gaps = positive_gaps[
-                positive_gaps > 0
-            ]
-
-            if positive_gaps.size:
-                bar_width = min(
-                    24.0,
-                    max(
-                        1.0,
-                        float(
-                            positive_gaps.min()
-                        ) * 0.38,
-                    ),
-                )
-            else:
-                bar_width = 12.0
-        else:
-            bar_width = min(
-                18.0,
-                max(
-                    1.0,
-                    len(axis_dates) * 0.05,
-                ),
-            )
-
-        revenue_specs = (
-            (
-                False,
-                "매출액",
-                "#b8b8b8",
-                "#737373",
-                None,
-            ),
-            (
-                True,
-                "매출액(예상)",
-                "#eeeeee",
-                "#737373",
-                "///",
-            ),
-        )
-
-        for (
-            is_estimated,
-            label,
-            facecolor,
-            edgecolor,
-            hatch,
-        ) in revenue_specs:
-            mask = (
-                np.isfinite(revenue)
-                & (estimated == is_estimated)
-            )
-
-            if not mask.any():
-                continue
-
-            bars = ax.bar(
-                positions[mask],
-                revenue[mask],
-                width=bar_width,
-                color=facecolor,
-                edgecolor=edgecolor,
-                linewidth=0.9,
-                hatch=hatch,
-                alpha=0.9,
-                label=label,
-                zorder=2,
-            )
-
-            for bar, value in zip(
-                bars,
-                revenue[mask],
-            ):
-                ax.annotate(
-                    f"{value:,.0f}",
-                    xy=(
-                        bar.get_x()
-                        + bar.get_width() / 2,
-                        value,
-                    ),
-                    xytext=(
-                        0,
-                        4 if value >= 0 else -4,
-                    ),
-                    textcoords="offset points",
-                    ha="center",
-                    va=(
-                        "bottom"
-                        if value >= 0
-                        else "top"
-                    ),
-                    fontsize=7.5,
-                    color="#525252",
-                )
-
-        # -------------------------------------------------
-        # 6. 영업이익·순이익 보조축
-        # -------------------------------------------------
-
-        right_ax = ax.twinx()
-
-        right_ax.set_ylabel(
-            "영업이익·순이익\n"
-            f"({FINANCIAL_UNIT_LABEL})",
-            fontsize=9,
-            fontweight="bold",
-            labelpad=5,
-        )
-
-        right_ax.yaxis.set_major_formatter(
-            FuncFormatter(number_formatter)
-        )
-
-        right_ax.tick_params(
-            axis="y",
-            labelsize=8,
-        )
-
-        line_specs = (
-            (
-                operating,
-                "영업이익",
-                "#dc2626",
-                "o",
-            ),
-            (
-                net_income,
-                "순이익",
-                "#16a34a",
-                "s",
-            ),
-        )
-
-        line_legend_handles = []
-
-        for values, label, color, marker in line_specs:
-            finite = np.isfinite(values)
-
-            if not finite.any():
-                continue
-
-            # 인접한 분기 사이만 연결합니다.
-            # 예상이 포함된 연결 구간은 점선으로 표시합니다.
-            for index in range(1, len(positions)):
-                consecutive = (
-                    quarter_ordinals[index]
-                    - quarter_ordinals[index - 1]
-                    == 1
-                )
-
-                if not (
-                    consecutive
-                    and finite[index - 1]
-                    and finite[index]
-                ):
-                    continue
-
-                forecast_segment = (
-                    estimated[index - 1]
-                    or estimated[index]
-                )
-
-                right_ax.plot(
-                    positions[index - 1:index + 1],
-                    values[index - 1:index + 1],
-                    color=color,
-                    linestyle=(
-                        "--"
-                        if forecast_segment
-                        else "-"
-                    ),
-                    linewidth=1.8,
-                    alpha=(
-                        0.85
-                        if forecast_segment
-                        else 1.0
-                    ),
-                    zorder=4,
-                )
-
-            # 종료 분기: 채운 마커
-            actual_mask = (
-                finite & ~estimated
-            )
-
-            if actual_mask.any():
-                right_ax.plot(
-                    positions[actual_mask],
-                    values[actual_mask],
-                    linestyle="None",
-                    marker=marker,
-                    markersize=5,
-                    markerfacecolor=color,
-                    markeredgecolor=color,
-                    color=color,
-                    zorder=5,
-                )
-
-                line_legend_handles.append(
-                    Line2D(
-                        [0],
-                        [0],
-                        color=color,
-                        linestyle="-",
-                        linewidth=1.8,
-                        marker=marker,
-                        markersize=5,
-                        markerfacecolor=color,
-                        markeredgecolor=color,
-                        label=label,
-                    )
-                )
-
-            # 진행 중·미래 분기: 빈 마커
-            forecast_mask = (
-                finite & estimated
-            )
-
-            if forecast_mask.any():
-                right_ax.plot(
-                    positions[forecast_mask],
-                    values[forecast_mask],
-                    linestyle="None",
-                    marker=marker,
-                    markersize=6,
-                    markerfacecolor="white",
-                    markeredgecolor=color,
-                    markeredgewidth=1.5,
-                    color=color,
-                    zorder=6,
-                )
-
-                line_legend_handles.append(
-                    Line2D(
-                        [0],
-                        [0],
-                        color=color,
-                        linestyle="--",
-                        linewidth=1.8,
-                        marker=marker,
-                        markersize=6,
-                        markerfacecolor="white",
-                        markeredgecolor=color,
-                        markeredgewidth=1.5,
-                        label=f"{label}(예상)",
-                    )
-                )
-
-            # 숫자 표시
-            for x_value, value in zip(
-                positions,
-                values,
-            ):
-                if not np.isfinite(value):
-                    continue
-
-                offset = (
-                    7
-                    if label == "영업이익"
-                    else -11
-                )
-
-                right_ax.annotate(
-                    f"{value:,.0f}",
-                    xy=(x_value, value),
-                    xytext=(0, offset),
-                    textcoords="offset points",
-                    ha="center",
-                    va=(
-                        "bottom"
-                        if offset > 0
-                        else "top"
-                    ),
-                    fontsize=7.5,
-                    color=color,
-                )
-
-        # -------------------------------------------------
-        # 7. 분기명과 예상 표시
-        # -------------------------------------------------
-
-        for (
-            x_value,
-            quarter,
-            is_estimated,
-        ) in zip(
-            positions,
-            financial["분기"],
-            estimated,
-        ):
-            quarter_label = (
-                f"{quarter}\n(예상)"
-                if is_estimated
-                else str(quarter)
-            )
-
-            ax.text(
-                x_value,
-                0.02,
-                quarter_label,
-                transform=ax.get_xaxis_transform(),
-                ha="center",
-                va="bottom",
-                fontsize=7.5,
-                fontweight=(
-                    "bold"
-                    if is_estimated
-                    else "normal"
-                ),
-                color=(
-                    "#b45309"
-                    if is_estimated
-                    else "#525252"
-                ),
-                bbox={
-                    "facecolor": "white",
-                    "alpha": 0.9,
-                    "edgecolor": "none",
-                    "pad": 1,
-                },
-                zorder=7,
-            )
-
-        ax.axhline(
-            0,
-            color="#94a3b8",
-            linewidth=0.6,
-        )
-
-        ax.margins(y=0.38)
-        right_ax.margins(y=0.45)
-
-        # -------------------------------------------------
-        # 8. 범례 및 안내
-        # -------------------------------------------------
-
-        bar_handles, bar_labels = (
-            ax.get_legend_handles_labels()
-        )
-
-        legend_handles = (
-            bar_handles + line_legend_handles
-        )
-
-        legend_labels = (
-            bar_labels
-            + [
-                handle.get_label()
-                for handle in line_legend_handles
-            ]
-        )
-
-        if legend_handles:
-            ax.legend(
-                legend_handles,
-                legend_labels,
-                loc="upper left",
-                ncol=3,
-                fontsize=7.2,
-                framealpha=0.92,
-            )
-
-        ax.text(
-            0.99,
-            0.98,
-            "진행·미래 분기: 빗금·점선·빈 마커\n"
-            "분기 시작 위치는 공시일을 의미하지 않음",
-            transform=ax.transAxes,
-            ha="right",
-            va="top",
-            fontsize=7,
-            color="#6b7280",
-            bbox={
-                "facecolor": "white",
-                "alpha": 0.9,
-                "edgecolor": "none",
-                "pad": 1,
-            },
-        )
-
-        return axis_dates
-
-    # -----------------------------------------------------
-    # 종합차트 생성
-    # -----------------------------------------------------
-
-    @staticmethod
-    def generate_chart(
-        df,
-        stock_name,
-        excel_file=None,
-        save_chart=False,
-        interactive=False,
-        img_dir="img",
-    ):
-        """
-        5패널 Figure를 생성합니다.
-
-        실제 데이터:
-            마지막 가격 데이터 기준 최근 18개월
-
-        미래 재무:
-            엑셀에 입력된 미래 분기까지 오른쪽에 추가
-
-        interactive:
-            기존 외부 호출과의 호환용 인자입니다.
-        """
-        ChartPlotter.setup_korean_font()
-
-        full_frame = (
-            ChartPlotter.prepare_chart_frame(df)
-        )
-
-        cumulative_start = (
-            full_frame.index[0]
-            .strftime("%Y-%m-%d")
-        )
-
-        plot_df = (
-            ChartPlotter.filter_recent_period(
-                full_frame
-            )
-        )
-
-        if plot_df.empty:
-            raise ValueError(
-                "차트에 표시할 데이터가 없습니다."
-            )
-
-        actual_dates = pd.DatetimeIndex(
-            pd.to_datetime(plot_df["날짜"])
-        )
-
-        actual_count = len(plot_df)
-        reference_date = actual_dates[-1]
-
-        # 재무 패널이 미래 날짜를 반환하면 이 축을 확장합니다.
-        axis_dates = actual_dates
-
-        fig = plt.figure(
-            figsize=(18, 14)
-        )
-
-        try:
-            grid = fig.add_gridspec(
-                5,
-                1,
-                height_ratios=[
-                    2.5,
-                    0.7,
-                    1.15,
-                    1.2,
-                    1.65,
-                ],
-                hspace=0.20,
-            )
-
-            ax1 = fig.add_subplot(grid[0])
-
-            ax2 = fig.add_subplot(
-                grid[1],
-                sharex=ax1,
-            )
-
-            ax3 = fig.add_subplot(
-                grid[2],
-                sharex=ax1,
-            )
-
-            ax4 = fig.add_subplot(
-                grid[3],
-                sharex=ax1,
-            )
-
-            ax5 = fig.add_subplot(
-                grid[4],
-                sharex=ax1,
-            )
-
-            # 실제 시장 데이터만 전달합니다.
-            ChartPlotter.plot_price_panel(
-                ax1,
-                plot_df,
-                stock_name,
-            )
-
-            ChartPlotter.plot_volume_panel(
-                ax2,
-                plot_df,
-            )
-
-            ChartPlotter.plot_macd_panel(
-                ax3,
-                plot_df,
-            )
-
-            ChartPlotter.plot_investor_volume_panel(
-                ax4,
-                plot_df,
-                cumulative_start,
-            )
-
-            axes_before_financial = set(fig.axes)
-
-            try:
-                financial_dates = (
-                    ChartPlotter.plot_financial_panel(
-                        ax5,
-                        plot_df,
-                        stock_name,
-                        excel_file,
-                    )
-                )
-
-                if financial_dates is not None:
-                    financial_dates = pd.DatetimeIndex(
-                        financial_dates
-                    )
-
-                    if len(financial_dates) >= actual_count:
-                        axis_dates = financial_dates
-
-            except Exception as error:
-                # 재무 패널에서 생성한 보조축만 제거합니다.
-                for extra_ax in list(fig.axes):
-                    if (
-                        extra_ax
-                        not in axes_before_financial
-                    ):
-                        extra_ax.remove()
-
-                ax5.clear()
-
-                set_panel_style(
-                    ax5,
-                    "5. 분기 재무",
-                    FINANCIAL_UNIT_LABEL,
-                )
-
-                panel_message(
-                    ax5,
-                    "재무 데이터를 표시하지 못했습니다.\n"
-                    + str(error),
-                )
-
-                axis_dates = actual_dates
-
-            # ---------------------------------------------
-            # 미래 구간 음영
-            # ---------------------------------------------
-
-            has_future = (
-                len(axis_dates) > actual_count
-            )
-
-            if has_future:
-                boundary = actual_count - 0.5
-
-                for panel_ax in (
-                    ax1,
-                    ax2,
-                    ax3,
-                    ax4,
-                    ax5,
-                ):
-                    panel_ax.axvspan(
-                        boundary,
-                        len(axis_dates) - 0.5,
-                        color="#f59e0b",
-                        alpha=0.06,
-                        zorder=0,
-                    )
-
-                    panel_ax.axvline(
-                        boundary,
-                        color="#b45309",
-                        linestyle=":",
-                        linewidth=1.0,
-                        alpha=0.8,
-                        zorder=3,
-                    )
-
-                ax1.text(
-                    0.99,
-                    0.97,
-                    "오른쪽 음영: 미래 재무 전망 구간\n"
-                    f"실제 가격 기준일: "
-                    f"{reference_date:%Y-%m-%d}",
-                    transform=ax1.transAxes,
-                    ha="right",
-                    va="top",
-                    fontsize=8,
-                    color="#92400e",
-                    bbox={
-                        "facecolor": "white",
-                        "alpha": 0.9,
-                        "edgecolor": "none",
-                        "pad": 3,
-                    },
-                    zorder=8,
-                )
-
-            # ---------------------------------------------
-            # 모든 패널의 공통 날짜 눈금
-            # ---------------------------------------------
-
-            tick_count = min(
-                10,
-                len(axis_dates),
-            )
-
-            tick_positions = np.unique(
-                np.linspace(
-                    0,
-                    len(axis_dates) - 1,
-                    tick_count,
-                    dtype=int,
-                )
-            )
-
-            if has_future:
-                # 실제 데이터 종료일을 눈금에 포함합니다.
-                tick_positions = np.unique(
-                    np.concatenate([
-                        tick_positions,
-                        np.array(
-                            [actual_count - 1],
-                            dtype=int,
-                        ),
-                    ])
-                )
-
-                minimum_gap = max(
-                    1.0,
-                    len(axis_dates) * 0.035,
-                )
-
-                # 실제 기준일과 너무 가까운 눈금은 제외합니다.
-                tick_positions = np.array(
-                    [
-                        position
-                        for position in tick_positions
-                        if (
-                            position == actual_count - 1
-                            or abs(
-                                position
-                                - (actual_count - 1)
-                            ) >= minimum_gap
-                        )
-                    ],
-                    dtype=int,
-                )
-
-            tick_labels = [
-                pd.Timestamp(
-                    axis_dates[position]
-                ).strftime("%Y-%m-%d")
-                for position in tick_positions
-            ]
-
-            ax5.set_xticks(tick_positions)
-
-            ax5.set_xticklabels(
-                tick_labels,
-                rotation=25,
-                ha="right",
-                fontsize=8,
-            )
-
-            if has_future:
-                xlabel = (
-                    "날짜 — 모든 패널 동일 축"
-                    " / 미래 구간은 월~금 기준 표시용 날짜"
-                )
-            else:
-                xlabel = (
-                    "거래일 — 모든 패널 동일 날짜 기준"
-                )
-
-            ax5.set_xlabel(
-                xlabel,
-                fontsize=9,
-                labelpad=3,
-            )
-
-            # 막대가 가장자리에서 잘리지 않도록 여백 설정
-            edge_padding = min(
-                15.0,
-                max(
-                    1.0,
-                    len(axis_dates) * 0.035,
-                ),
-            )
-
-            ax1.set_xlim(
-                -edge_padding,
-                len(axis_dates) - 1 + edge_padding,
-            )
-
-            for panel_ax in (
-                ax1,
-                ax2,
-                ax3,
-                ax4,
-            ):
-                panel_ax.tick_params(
-                    axis="x",
-                    labelbottom=False,
-                )
-
-            fig.subplots_adjust(
-                left=0.095,
-                right=0.90,
-                top=0.975,
-                bottom=0.065,
-            )
-
-            # ---------------------------------------------
-            # 선택적 파일 저장
-            # ---------------------------------------------
-
-            if save_chart:
-                output_dir = Path(img_dir)
-
-                output_dir.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-
-                save_date = pd.Timestamp.now(
-                    tz="Asia/Seoul"
-                ).strftime("%Y%m%d")
-
-                safe_name = "".join(
-                    "_"
-                    if (
-                        char in '<>:"/\\|?*'
-                        or ord(char) < 32
-                    )
-                    else char
-                    for char in str(stock_name)
-                ).strip(" .")
-
-                if not safe_name:
-                    safe_name = "stock"
-
-                filename = (
-                    output_dir
-                    / f"{safe_name}_{save_date}.png"
-                )
-
-                fig.savefig(
-                    filename,
-                    format="png",
-                    dpi=300,
-                    bbox_inches="tight",
-                    facecolor="white",
-                )
-
-            return fig
-
-        except Exception:
-            plt.close(fig)
-            raise
+    return df
 
 
 # =========================================================
-# Streamlit / 배치 실행용 PNG 반환
+# 분석 실행
 # =========================================================
 
-def make_chart_png(
+def trend_flag(row, column):
+    """
+    추세 값(+1 상승 / -1 하락 / 0 없음)을 JSON 친화적 정수로 돌려줍니다.
+    값이 없거나 계산 불가면 None입니다(화면에서 회색 원).
+    """
+    if column not in row.index:
+        return None
+
+    value = row.get(column)
+
+    if value is None or pd.isna(value):
+        return None
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not np.isfinite(number):
+        return None
+
+    return int(np.sign(number))
+
+
+NOMAD_SURGE_RATIO = 2.0    # 거래량 폭등: 전일 대비 2배 이상
+NOMAD_DRY_RATIO = 0.30     # 거래량 급감: 폭등일 거래량의 30% 이하
+NOMAD_RECENT_DAYS = 3      # 폭등일은 마지막 거래일 기준 최근 3거래일 이내
+NOMAD_DRY_DAYS = (1, 2)    # 폭등일 이후 1~2일 연속 음봉
+NOMAD_SELL_DRY_RATIO = 0.52  # 매도 전용 급감 기준(매수 30%와 별도)
+NOMAD_CHART_MONTHS = 18    # charts.DISPLAY_MONTHS와 같아야 합니다(차트 표시 구간)
+NOMAD_RECENT_WINDOW = 7    # 전체 결과 요약에서 '최근 신호'로 볼 기간(달력일)
+
+MA_FAST = 5                # 이동평균 단기
+MA_SLOW = 20               # 이동평균 장기
+MA_SLOPE_LOOKBACK = 1      # MA20 기울기 비교 간격(거래일)
+
+
+def nomad_patterns(
     df,
-    stock_name,
-    excel_file=None,
+    surge_ratio=NOMAD_SURGE_RATIO,
+    dry_ratio=NOMAD_DRY_RATIO,
+    recent_days=None,
+    dry_days=NOMAD_DRY_DAYS,
+    direction="buy",
 ):
     """
-    최근 18개월 실제 데이터와 미래 분기 재무를
-    포함한 5패널 차트를 PNG bytes로 반환합니다.
+    유목민 매수 패턴을 전 구간에서 찾습니다. (차트 별표·성과 집계용)
+
+    규칙
+        ① 폭등일 g: 거래량[g] >= 거래량[g-1] x 2   (전일 대비 2배 이상)
+        ② 폭등일 g: 종가[g] > 종가[g-1]            (상승)
+        ③ 이후 1~2거래일 연속 음봉: 종가 < 시가
+        ④ 그 음봉일들의 거래량 <= 거래량[g] x 0.30
+        ⑤ recent_days가 주어지면 데이터 끝에서 그만큼 이내의 폭등만 인정
+
+    신호는 마지막 음봉일(패턴이 완성된 날)에 표시합니다.
+    같은 폭등일에 1일 완성과 2일 완성이 겹치면 더 늦은 쪽(긴 음봉)만 남겨
+    한 번의 패턴이 두 번 집계되지 않게 합니다.
     """
-    with _CHART_LOCK:
-        fig = None
+    frame = pd.DataFrame(index=df.index)
+    columns = (
+        "유목민신호",
+        "유목민신호일수",
+        "유목민 거래량배수",
+        "유목민 급감비율",
+        "유목민 폭등상승률",
+        "유목민 음봉등락률",
+        "유목민 폭등일",
+        "유목민 음봉일",
+        "유목민 음봉일목록",
+    )
 
-        try:
-            fig = ChartPlotter.generate_chart(
-                df,
-                stock_name,
-                excel_file=excel_file,
-                save_chart=False,
-                interactive=False,
-            )
+    for column in columns:
+        frame[column] = 0 if column in ("유목민신호", "유목민신호일수") else None
 
-            with io.BytesIO() as buffer:
-                fig.savefig(
-                    buffer,
-                    format="png",
-                    dpi=300,
-                    bbox_inches="tight",
-                    facecolor="white",
-                    transparent=False,
+    if df is None or df.empty:
+        return frame
+
+    if not {"시가", "종가", "거래량"}.issubset(df.columns):
+        return frame
+
+    volume = pd.to_numeric(df["거래량"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(df.index)
+
+    count = len(df)
+    last = count - 1
+    candidates = {}
+
+    for index in range(count):
+        for days in sorted(dry_days, reverse=True):
+            spike = index - days
+            base = spike - 1
+
+            if base < 0:
+                continue
+
+            if recent_days is not None and last - spike > recent_days:
+                continue
+
+            values = (volume[base], volume[spike], close[base], close[spike])
+
+            if not all(np.isfinite(values)) or values[0] <= 0 or values[1] <= 0:
+                continue
+
+            if volume[spike] < volume[base] * surge_ratio:
+                continue
+
+            dry_slice = range(spike + 1, index + 1)
+
+            if direction == "sell":
+                # 매도(대칭): 거래량 폭등 + 하락 -> 이후 1~2일 연속 양봉
+                if close[spike] >= close[base]:
+                    continue
+
+                confirmed = all(
+                    np.isfinite(open_price[j])
+                    and np.isfinite(close[j])
+                    and close[j] > open_price[j]
+                    for j in dry_slice
+                )
+            else:
+                # 매수: 거래량 폭등 + 상승 -> 이후 1~2일 연속 음봉
+                if close[spike] <= close[base]:
+                    continue
+
+                confirmed = all(
+                    np.isfinite(open_price[j])
+                    and np.isfinite(close[j])
+                    and close[j] < open_price[j]
+                    for j in dry_slice
                 )
 
-                return buffer.getvalue()
+            if not confirmed:
+                continue
 
-        finally:
-            if fig is not None:
-                plt.close(fig)
+            quiet = all(
+                np.isfinite(volume[j]) and volume[j] <= volume[spike] * dry_ratio
+                for j in dry_slice
+            )
+
+            if not quiet:
+                continue
+
+            if spike not in candidates or index >= candidates[spike][0]:
+                candidates[spike] = (index, days)
+
+            break
+
+    for spike, (index, days) in sorted(candidates.items()):
+        dry_slice = range(spike + 1, index + 1)
+        day_change = 0.0
+
+        if index >= 1 and np.isfinite(close[index - 1]) and close[index - 1]:
+            day_change = (close[index] / close[index - 1] - 1) * 100
+
+        frame.iloc[index, frame.columns.get_loc("유목민신호")] = 1
+        frame.iloc[index, frame.columns.get_loc("유목민신호일수")] = days
+        frame.iloc[index, frame.columns.get_loc("유목민 거래량배수")] = round(
+            volume[spike] / volume[spike - 1], 2
+        )
+        frame.iloc[index, frame.columns.get_loc("유목민 급감비율")] = round(
+            max(volume[j] for j in dry_slice) / volume[spike] * 100, 1
+        )
+        frame.iloc[index, frame.columns.get_loc("유목민 폭등상승률")] = round(
+            (close[spike] / close[spike - 1] - 1) * 100, 2
+        )
+        frame.iloc[index, frame.columns.get_loc("유목민 음봉등락률")] = round(
+            day_change, 2
+        )
+        frame.iloc[index, frame.columns.get_loc("유목민 폭등일")] = dates[
+            spike
+        ].strftime("%Y-%m-%d")
+        frame.iloc[index, frame.columns.get_loc("유목민 음봉일")] = dates[
+            index
+        ].strftime("%Y-%m-%d")
+        frame.iloc[index, frame.columns.get_loc("유목민 음봉일목록")] = ", ".join(
+            dates[j].strftime("%Y-%m-%d") for j in dry_slice
+        )
+
+    return frame
+
+
+def recent_nomad_signal(df, days=NOMAD_RECENT_WINDOW, direction="buy"):
+    """
+    최근 days일(달력일) 안에 발생한 마지막 유목민 매수 신호를 돌려줍니다.
+
+    전체 결과 요약의 '유목민 신호' 열에서 사용합니다.
+    신호가 없거나 데이터가 모자라면 신호 없음입니다.
+    """
+    result = {
+        "신호": "신호 없음",
+        "발생일": None,
+        "음봉일수": None,
+        "경과일": None,
+        "거래량배수": None,
+        "급감비율": None,
+    }
+
+    if df is None or df.empty or not {"시가", "종가", "거래량"}.issubset(df.columns):
+        return result
+
+    patterns = nomad_patterns(df, direction=direction)
+
+    if patterns.empty:
+        return result
+
+    dates = pd.to_datetime(df.index)
+    reference = dates[-1]
+    cutoff = reference - pd.Timedelta(days=days - 1)
+    flags = patterns["유목민신호"].to_numpy(dtype=int) == 1
+    hits = [index for index in np.flatnonzero(flags) if dates[index] >= cutoff]
+
+    if not hits:
+        return result
+
+    index = hits[-1]
+
+    result.update({
+        "신호": "매수" if direction == "buy" else "매도",
+        "발생일": dates[index].strftime("%Y-%m-%d"),
+        "음봉일수": int(patterns["유목민신호일수"].iat[index]),
+        "경과일": int((reference - dates[index]).days),
+        "거래량배수": float(patterns["유목민 거래량배수"].iat[index]),
+        "급감비율": float(patterns["유목민 급감비율"].iat[index]),
+    })
+
+    return result
+
+
+def pattern_index(patterns):
+    """nomad_patterns 결과에서 신호가 1인 위치(bool 배열)를 돌려줍니다."""
+    return patterns["유목민신호"].to_numpy(dtype=int) == 1
+
+
+NOMAD_FORWARD_DAYS = (5, 10, 20)
+
+
+def nomad_signal_stats(
+    df,
+    horizons=NOMAD_FORWARD_DAYS,
+    surge_ratio=NOMAD_SURGE_RATIO,
+    dry_ratio=NOMAD_DRY_RATIO,
+    dry_days=NOMAD_DRY_DAYS,
+    chart_months=NOMAD_CHART_MONTHS,
+    direction="buy",
+):
+    """
+    과거 유목민 매수 신호가 난 뒤 5·10·20거래일 수익률을 집계합니다.
+
+    - 진입: 신호 다음 거래일 시가 (신호는 종가 확정 후 알 수 있으므로)
+    - 청산: 신호일 + N거래일 종가
+    - 비용: 왕복 TRADING_COST_PCT(0.3%p)를 차감합니다.
+    - 기준선: 같은 진입·비용 규칙으로 전 구간 아무 날에나 진입했을 때의
+      상승 비율. 이보다 낮으면 신호에 우위가 없다는 뜻입니다.
+    """
+    empty = {
+        "신호수": 0,
+        "차트신호수": 0,
+        "차트개월": chart_months,
+        "차트시작일": None,
+        "기간": None,
+        "보유기간": list(horizons),
+        "요약": [],
+        "신호목록": [],
+    }
+
+    if df is None or df.empty or not {"시가", "종가", "거래량"}.issubset(df.columns):
+        return empty
+
+    patterns = nomad_patterns(
+        df,
+        surge_ratio=surge_ratio,
+        dry_ratio=dry_ratio,
+        dry_days=dry_days,
+        direction=direction,
+    )
+
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(df.index)
+    count = len(df)
+
+    empty["기간"] = [
+        dates[0].strftime("%Y-%m-%d"),
+        dates[-1].strftime("%Y-%m-%d"),
+    ]
+
+    # 차트는 최근 chart_months개월만 그립니다. 별표와 숫자를 맞추기 위해
+    # 차트 표시 구간 안의 신호 수를 따로 셉니다.
+    chart_start = dates[-1] - pd.DateOffset(months=chart_months)
+    empty["차트시작일"] = chart_start.strftime("%Y-%m-%d")
+
+    signal_index = np.flatnonzero(pattern_index(patterns))
+    records = []
+
+    for index in signal_index:
+        entry_index = index + 1
+
+        if entry_index < count and np.isfinite(open_price[entry_index]):
+            entry = float(open_price[entry_index])
+        elif np.isfinite(close[index]):
+            entry = float(close[index])
+            entry_index = index
+        else:
+            continue
+
+        if entry <= 0:
+            continue
+
+        record = {
+            "폭등일": patterns["유목민 폭등일"].iat[index],
+            "음봉일": patterns["유목민 음봉일"].iat[index],
+            "음봉일수": int(patterns["유목민신호일수"].iat[index]),
+            "거래량배수": float(patterns["유목민 거래량배수"].iat[index]),
+            "급감비율": float(patterns["유목민 급감비율"].iat[index]),
+            "폭등상승률": float(patterns["유목민 폭등상승률"].iat[index]),
+            "진입일": dates[entry_index].strftime("%Y-%m-%d"),
+            "진입가": round(entry, 0),
+            "차트표시": bool(dates[index] >= chart_start),
+        }
+
+        for horizon in horizons:
+            exit_index = index + horizon
+            value = None
+
+            if exit_index < count and np.isfinite(close[exit_index]):
+                sign = -1.0 if direction == "sell" else 1.0
+                value = (
+                    (close[exit_index] / entry - 1.0) * 100.0 * sign
+                    - TRADING_COST_PCT
+                )
+
+            record[f"수익률{horizon}"] = None if value is None else round(value, 2)
+
+        records.append(record)
+
+    summary = []
+
+    for horizon in horizons:
+        values = [
+            record[f"수익률{horizon}"]
+            for record in records
+            if record[f"수익률{horizon}"] is not None
+        ]
+
+        baseline_values = []
+
+        # 기준선도 신호와 같은 방향으로 계산합니다.
+        # 매도 신호의 승리는 '하락'이므로, 상승 비율을 그대로 쓰면
+        # 승률과 기준선이 서로 반대 방향이 되어 초과가 왜곡됩니다.
+        baseline_sign = -1.0 if direction == "sell" else 1.0
+
+        for index in range(count - horizon - 1):
+            entry = open_price[index + 1]
+            exit_price = close[index + horizon]
+
+            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
+                baseline_values.append(
+                    (exit_price / entry - 1.0) * baseline_sign
+                    - TRADING_COST_RATE
+                )
+
+        baseline = (
+            sum(1 for value in baseline_values if value > 0) / len(baseline_values) * 100
+            if baseline_values else None
+        )
+
+        if values:
+            series = pd.Series(values)
+            win_rate = float((series > 0).mean() * 100)
+            average = float(series.mean())
+        else:
+            win_rate = average = None
+
+        summary.append({
+            "보유일수": horizon,
+            "표본": len(values),
+            "승률": None if win_rate is None else round(win_rate, 1),
+            "평균": None if average is None else round(average, 2),
+            "중앙값": None if not values else round(float(pd.Series(values).median()), 2),
+            "최선": None if not values else round(float(max(values)), 2),
+            "최악": None if not values else round(float(min(values)), 2),
+            "기준선": None if baseline is None else round(float(baseline), 1),
+            "초과": (
+                None
+                if win_rate is None or baseline is None
+                else round(win_rate - float(baseline), 1)
+            ),
+        })
+
+    return {
+        "신호수": len(records),
+        "차트신호수": sum(1 for record in records if record["차트표시"]),
+        "차트개월": chart_months,
+        "차트시작일": empty["차트시작일"],
+        "기간": empty["기간"],
+        "보유기간": list(horizons),
+        "요약": summary,
+        "신호목록": records,
+    }
+
+
+# =========================================================
+# 더블 탑 / 더블 바텀 (쌍고점 매도 · 쌍바닥 매수)
+# =========================================================
+
+DOUBLE_PIVOT = 5            # 좌우 5봉보다 높으면(낮으면) 확정 고점(저점)
+DOUBLE_TOLERANCE = 0.015    # 두 고점(저점) 가격 차이 1.5% 이내 (스윕 결과 반영)
+DOUBLE_MIN_GAP = 8          # 두 봉 사이 최소 간격(거래일)
+DOUBLE_MAX_GAP = 90         # 두 봉 사이 최대 간격(거래일)
+DOUBLE_MIN_DEPTH = 0.03     # 두 고점(저점) 사이 골(산)이 3% 이상이어야 인정 (스윕 결과 반영)
+DOUBLE_CONFIRM_WINDOW = 60  # 두 번째 봉 이후 넥라인 돌파를 기다리는 최대 봉수
+DOUBLE_COOLDOWN = 10        # 같은 패턴 신호의 최소 간격(거래일)
+DOUBLE_RECENT_WINDOW = 7    # 요약 화면에서 '최근 신호'로 볼 기간(달력일)
+
+
+def double_pivots(high, low, window=DOUBLE_PIVOT):
+    """
+    좌우 window봉보다 확실히 높은 고점과 낮은 저점의 위치를 찾습니다.
+
+    고점·저점은 window봉이 더 지나야 확정되므로, 그 이전에는 신호가 나오지
+    않습니다(미래 참조 방지).
+    """
+    count = len(high)
+    peaks = []
+    troughs = []
+
+    for index in range(window, count - window):
+        left_high = high[index - window:index]
+        right_high = high[index + 1:index + window + 1]
+        left_low = low[index - window:index]
+        right_low = low[index + 1:index + window + 1]
+
+        if not (
+            np.all(np.isfinite(left_high))
+            and np.all(np.isfinite(right_high))
+            and np.all(np.isfinite(left_low))
+            and np.all(np.isfinite(right_low))
+        ):
+            continue
+
+        if (
+            np.isfinite(high[index])
+            and high[index] >= left_high.max()
+            and high[index] >= right_high.max()
+        ):
+            peaks.append(index)
+
+        if (
+            np.isfinite(low[index])
+            and low[index] <= left_low.min()
+            and low[index] <= right_low.min()
+        ):
+            troughs.append(index)
+
+    return peaks, troughs
+
+
+def detect_double_patterns(
+    df,
+    pivot=DOUBLE_PIVOT,
+    tolerance=DOUBLE_TOLERANCE,
+    min_gap=DOUBLE_MIN_GAP,
+    max_gap=DOUBLE_MAX_GAP,
+    min_depth=DOUBLE_MIN_DEPTH,
+    confirm_window=DOUBLE_CONFIRM_WINDOW,
+    cooldown=DOUBLE_COOLDOWN,
+):
+    """
+    더블 탑(쌍고점)과 더블 바텀(쌍바닥)을 전 구간에서 찾습니다.
+
+    더블 탑 (매도)
+        ① 거의 같은 높이의 고점 두 개(가격 차이 tolerance 이내)
+        ② 사이에 min_depth 이상 내려간 골
+        ③ 두 번째 고점이 확정된 뒤 종가가 골(넥라인)을 아래로 이탈 -> 매도
+
+    더블 바텀 (매수)
+        ① 거의 같은 낮이의 저점 두 개
+        ② 사이에 min_depth 이상 올라간 산
+        ③ 두 번째 저점이 확정된 뒤 종가가 산(넥라인)을 위로 돌파 -> 매수
+
+    신호는 넥라인을 돌파한 날(확인일)에만 1이 됩니다.
+    """
+    frame = pd.DataFrame(index=df.index)
+
+    for column in (
+        "쌍고점신호",
+        "쌍바닥신호",
+    ):
+        frame[column] = 0
+
+    for column in (
+        "쌍고점 1차",
+        "쌍고점 2차",
+        "쌍고점 넥라인",
+        "쌍바닥 1차",
+        "쌍바닥 2차",
+        "쌍바닥 넥라인",
+        "쌍고점 이격",
+        "쌍바닥 이격",
+    ):
+        frame[column] = np.nan
+
+    if df is None or df.empty:
+        return frame
+
+    if not {"고가", "저가", "종가"}.issubset(df.columns):
+        return frame
+
+    high = pd.to_numeric(df["고가"], errors="coerce").to_numpy(dtype=float)
+    low = pd.to_numeric(df["저가"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    count = len(df)
+
+    peaks, troughs = double_pivots(high, low, pivot)
+
+    def find_confirmation(start, predicate):
+        for index in range(start, min(start + confirm_window, count)):
+            if predicate(index):
+                return index
+
+        return None
+
+    def write(signal_index, prefix, first_value, second_value, neckline, gap_rate):
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix}신호")
+        ] = 1
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix} 1차")
+        ] = round(first_value, 2)
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix} 2차")
+        ] = round(second_value, 2)
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix} 넥라인")
+        ] = round(neckline, 2)
+        frame.iloc[
+            signal_index, frame.columns.get_loc(f"{prefix} 이격")
+        ] = round(gap_rate * 100, 2)
+
+    # ---------------- 더블 탑 ----------------
+    last_top = -10 ** 9
+
+    for position, first in enumerate(peaks):
+        for second in peaks[position + 1:]:
+            gap = second - first
+
+            if gap < min_gap:
+                continue
+
+            if gap > max_gap:
+                break
+
+            first_high = high[first]
+            second_high = high[second]
+
+            if not (np.isfinite(first_high) and np.isfinite(second_high)):
+                continue
+
+            lower_peak = min(first_high, second_high)
+
+            if lower_peak <= 0:
+                continue
+
+            gap_rate = abs(second_high - first_high) / lower_peak
+
+            if gap_rate > tolerance:
+                continue
+
+            neckline = np.nanmin(low[first:second + 1])
+
+            if not np.isfinite(neckline):
+                continue
+
+            if (lower_peak - neckline) / lower_peak < min_depth:
+                continue
+
+            signal_index = find_confirmation(
+                second + pivot,
+                lambda index: np.isfinite(close[index]) and close[index] < neckline,
+            )
+
+            if signal_index is None:
+                continue
+
+            if signal_index - last_top < cooldown:
+                continue
+
+            write(signal_index, "쌍고점", first_high, second_high, neckline, gap_rate)
+            last_top = signal_index
+            break
+
+    # ---------------- 더블 바텀 ----------------
+    last_bottom = -10 ** 9
+
+    for position, first in enumerate(troughs):
+        for second in troughs[position + 1:]:
+            gap = second - first
+
+            if gap < min_gap:
+                continue
+
+            if gap > max_gap:
+                break
+
+            first_low = low[first]
+            second_low = low[second]
+
+            if not (np.isfinite(first_low) and np.isfinite(second_low)):
+                continue
+
+            higher_trough = max(first_low, second_low)
+
+            if higher_trough <= 0:
+                continue
+
+            gap_rate = abs(second_low - first_low) / higher_trough
+
+            if gap_rate > tolerance:
+                continue
+
+            neckline = np.nanmax(high[first:second + 1])
+
+            if not np.isfinite(neckline):
+                continue
+
+            if (neckline - higher_trough) / neckline < min_depth:
+                continue
+
+            signal_index = find_confirmation(
+                second + pivot,
+                lambda index: np.isfinite(close[index]) and close[index] > neckline,
+            )
+
+            if signal_index is None:
+                continue
+
+            if signal_index - last_bottom < cooldown:
+                continue
+
+            write(signal_index, "쌍바닥", first_low, second_low, neckline, gap_rate)
+            last_bottom = signal_index
+            break
+
+    return frame
+
+
+def add_double_signal(df, **kwargs):
+    """더블 탑·더블 바텀 신호(0/1)를 컬럼으로 추가합니다."""
+    frame = df.copy()
+    patterns = detect_double_patterns(frame, **kwargs)
+
+    frame["쌍고점신호"] = patterns["쌍고점신호"].to_numpy()
+    frame["쌍바닥신호"] = patterns["쌍바닥신호"].to_numpy()
+
+    return frame
+
+
+def double_signal_stats(df, horizons=NOMAD_FORWARD_DAYS, **kwargs):
+    """
+    더블 바닥(매수)·더블 탑(매도) 신호 이후 5·10·20거래일 성과를 집계합니다.
+
+    진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가이며
+    왕복 비용 TRADING_COST_PCT(0.3%p)를 차감합니다.
+    쌍고점(매도)은 '매도가 유리했는지'를 보기 위해 수익률 부호를 뒤집어
+    (하락하면 +) 집계합니다.
+    """
+    empty = {
+        "기간": None,
+        "보유기간": list(horizons),
+        "쌍바닥": {"신호수": 0, "요약": [], "신호목록": []},
+        "쌍고점": {"신호수": 0, "요약": [], "신호목록": []},
+    }
+
+    if df is None or df.empty or not {"고가", "저가", "종가", "시가"}.issubset(df.columns):
+        return empty
+
+    patterns = detect_double_patterns(df, **kwargs)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(df.index)
+    count = len(df)
+
+    empty["기간"] = [dates[0].strftime("%Y-%m-%d"), dates[-1].strftime("%Y-%m-%d")]
+
+    # 기준선: 같은 진입 규칙으로 아무 날에나 진입했을 때의 승리 비율.
+    # 매수는 '상승', 매도는 '하락'이 승리이므로 방향별로 따로 계산합니다.
+    base_by_direction = {1: {}, -1: {}}
+
+    for horizon in horizons:
+        samples = {1: [], -1: []}
+
+        for index in range(count - horizon - 1):
+            entry = open_price[index + 1]
+            exit_price = close[index + horizon]
+
+            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
+                signed = (exit_price / entry - 1.0) - TRADING_COST_RATE
+                samples[1].append(signed > 0)
+                samples[-1].append(-signed - TRADING_COST_RATE > 0)
+
+        for key in (1, -1):
+            base_by_direction[key][horizon] = (
+                round(float(np.mean(samples[key]) * 100), 1)
+                if samples[key]
+                else None
+            )
+
+    result = {"기간": empty["기간"], "보유기간": list(horizons)}
+
+    for label, prefix, column, direction in (
+        ("쌍바닥", "쌍바닥", "쌍바닥신호", 1),
+        ("쌍고점", "쌍고점", "쌍고점신호", -1),
+    ):
+        baselines = base_by_direction[direction]
+        records = []
+
+        for index in np.flatnonzero(patterns[column].to_numpy(dtype=int) == 1):
+            entry_index = index + 1
+
+            if entry_index >= count or not np.isfinite(open_price[entry_index]):
+                continue
+
+            entry = float(open_price[entry_index])
+
+            if entry <= 0:
+                continue
+
+            record = {
+                "신호일": dates[index].strftime("%Y-%m-%d"),
+                "진입일": dates[entry_index].strftime("%Y-%m-%d"),
+                "진입가": round(entry, 0),
+                "넥라인": float(patterns[f"{prefix} 넥라인"].iat[index]),
+                "이격(%)": float(patterns[f"{prefix} 이격"].iat[index]),
+                "차트표시": bool(dates[index] >= dates[-1] - pd.DateOffset(months=NOMAD_CHART_MONTHS)),
+            }
+
+            for horizon in horizons:
+                exit_index = index + horizon
+                value = None
+
+                if exit_index < count and np.isfinite(close[exit_index]):
+                    value = (
+                        (close[exit_index] / entry - 1) * 100 * direction
+                        - TRADING_COST_PCT
+                    )
+
+                record[f"수익률{horizon}"] = None if value is None else round(value, 2)
+
+            records.append(record)
+
+        summary = []
+
+        for horizon in horizons:
+            values = [r[f"수익률{horizon}"] for r in records if r[f"수익률{horizon}"] is not None]
+            summary.append({
+                "보유일수": horizon,
+                "표본": len(values),
+                "승률": None if not values else round(float(np.mean([v > 0 for v in values]) * 100), 1),
+                "평균": None if not values else round(float(np.mean(values)), 2),
+                "중앙값": None if not values else round(float(np.median(values)), 2),
+                "최선": None if not values else round(float(max(values)), 2),
+                "최악": None if not values else round(float(min(values)), 2),
+                "기준선": baselines.get(horizon),
+                "초과": (
+                    None
+                    if not values or baselines.get(horizon) is None
+                    else round(
+                        float(np.mean([v > 0 for v in values]) * 100)
+                        - baselines[horizon],
+                        1,
+                    )
+                ),
+            })
+
+        result[label] = {
+            "신호수": len(records),
+            "요약": summary,
+            "신호목록": records,
+            "방향": "매수" if direction == 1 else "매도(하락이 +)",
+        }
+
+    return result
+
+
+def recent_double_signal(df, days=DOUBLE_RECENT_WINDOW):
+    """
+    최근 days일(달력일) 안에 확정된 마지막 더블 탑·더블 바텀 신호를 돌려줍니다.
+
+    쌍바닥은 매수, 쌍고점은 매도 신호입니다.
+    """
+    result = {
+        "신호": "신호 없음",
+        "패턴": None,
+        "발생일": None,
+        "경과일": None,
+        "1차": None,
+        "2차": None,
+        "넥라인": None,
+        "이격(%)": None,
+    }
+
+    if df is None or df.empty or not {"고가", "저가", "종가"}.issubset(df.columns):
+        return result
+
+    patterns = detect_double_patterns(df)
+
+    if patterns.empty:
+        return result
+
+    dates = pd.to_datetime(df.index)
+    reference = dates[-1]
+    cutoff = reference - pd.Timedelta(days=days - 1)
+
+    candidates = []
+
+    for index in range(len(patterns)):
+        if dates[index] < cutoff:
+            continue
+
+        if int(patterns["쌍바닥신호"].iat[index]) == 1:
+            candidates.append((index, "매수", "더블 바텀", "쌍바닥"))
+
+        if int(patterns["쌍고점신호"].iat[index]) == 1:
+            candidates.append((index, "매도", "더블 탑", "쌍고점"))
+
+    if not candidates:
+        return result
+
+    index, signal, pattern, prefix = sorted(candidates)[-1]
+
+    result.update({
+        "신호": signal,
+        "패턴": pattern,
+        "발생일": dates[index].strftime("%Y-%m-%d"),
+        "경과일": int((reference - dates[index]).days),
+        "1차": float(patterns[f"{prefix} 1차"].iat[index]),
+        "2차": float(patterns[f"{prefix} 2차"].iat[index]),
+        "넥라인": float(patterns[f"{prefix} 넥라인"].iat[index]),
+        "이격(%)": float(patterns[f"{prefix} 이격"].iat[index]),
+    })
+
+    return result
+
+
+def add_nomad_signal(df, **kwargs):
+    """유목민 매수 신호(0/1)와 음봉일수를 컬럼으로 추가합니다."""
+    frame = df.copy()
+    patterns = nomad_patterns(frame, **kwargs)
+
+    frame["유목민신호"] = patterns["유목민신호"].astype(int)
+    frame["유목민신호일수"] = patterns["유목민신호일수"].astype(int)
+
+    return frame
+
+
+def add_nomad_sell_signal(df, **kwargs):
+    """
+    유목민 매도 신호(0/1)를 '유목민매도신호' 컬럼으로 추가합니다.
+
+    차트의 매도 별표와 성과 집계가 이 컬럼을 씁니다.
+    매도 전용 급감 기준(NOMAD_SELL_DRY_RATIO)을 기본값으로 씁니다.
+    """
+    frame = df.copy()
+
+    kwargs.setdefault("dry_ratio", NOMAD_SELL_DRY_RATIO)
+
+    patterns = nomad_patterns(frame, direction="sell", **kwargs)
+
+    frame["유목민매도신호"] = patterns["유목민신호"].astype(int)
+    frame["유목민매도신호일수"] = patterns["유목민신호일수"].astype(int)
+
+    return frame
+
+
+def detect_nomad_buy(
+    df,
+    surge_ratio=NOMAD_SURGE_RATIO,
+    dry_ratio=NOMAD_DRY_RATIO,
+    recent_days=None,
+    dry_days=NOMAD_DRY_DAYS,
+):
+    """
+    마지막 거래일 기준 유목민 매수 신호를 판정합니다.
+
+    최근 3거래일 이내에 '전일 대비 거래량 2배 이상 + 상승'이 나오고,
+    그 뒤 1~2일 연속 음봉이면서 거래량이 폭등일의 30% 이하로 줄면
+    매수 신호로 봅니다.
+    """
+    status = {
+        "유목민 매수": False,
+        "유목민 폭등일": None,
+        "유목민 음봉일": None,
+        "유목민 음봉일수": None,
+        "유목민 음봉일목록": None,
+        "유목민 거래량배수": None,
+        "유목민 급감비율": None,
+        "유목민 폭등상승률": None,
+        "유목민 음봉등락률": None,
+        "유목민 판정": "",
+    }
+
+    if df is None or len(df) < 3 or not {"시가", "종가", "거래량"}.issubset(df.columns):
+        status["유목민 판정"] = "판정에 필요한 데이터가 부족합니다."
+        return status
+
+    patterns = nomad_patterns(
+        df,
+        surge_ratio=surge_ratio,
+        dry_ratio=dry_ratio,
+        recent_days=recent_days,
+        dry_days=dry_days,
+    )
+
+    last_row = patterns.iloc[-1]
+
+    if int(last_row["유목민신호"]) == 1:
+        status.update({
+            "유목민 매수": True,
+            "유목민 폭등일": last_row["유목민 폭등일"],
+            "유목민 음봉일": last_row["유목민 음봉일"],
+            "유목민 음봉일수": int(last_row["유목민신호일수"]),
+            "유목민 음봉일목록": last_row["유목민 음봉일목록"],
+            "유목민 거래량배수": float(last_row["유목민 거래량배수"]),
+            "유목민 급감비율": float(last_row["유목민 급감비율"]),
+            "유목민 폭등상승률": float(last_row["유목민 폭등상승률"]),
+            "유목민 음봉등락률": float(last_row["유목민 음봉등락률"]),
+            "유목민 판정": "조건 충족",
+        })
+        return status
+
+    # 불충족 사유: 가장 조건에 가까운 후보(사유가 적은 쪽)를 설명합니다.
+    volume = pd.to_numeric(df["거래량"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    last = len(df) - 1
+
+    def diagnose(days):
+        spike = last - days
+        base = spike - 1
+
+        if base < 0:
+            return ["비교할 과거 데이터 부족"]
+
+        if not np.isfinite(volume[base]) or volume[base] <= 0:
+            return ["거래량 결측"]
+
+        reasons = []
+
+        if volume[spike] < volume[base] * surge_ratio:
+            reasons.append(f"거래량 폭등 미달({volume[spike] / volume[base]:.2f}배)")
+
+        if close[spike] <= close[base]:
+            reasons.append("폭등일 상승 아님")
+
+        dry_slice = range(spike + 1, last + 1)
+        bearish = all(
+            np.isfinite(open_price[j]) and close[j] < open_price[j]
+            for j in dry_slice
+        )
+
+        if not bearish:
+            reasons.append("음봉 아님")
+
+        worst = max(volume[j] for j in dry_slice) / volume[spike] * 100
+
+        if worst > dry_ratio * 100:
+            reasons.append(
+                f"거래량 급감 미달({worst:.1f}% > {dry_ratio * 100:.0f}%)"
+            )
+
+        return reasons
+
+    best = min((diagnose(days) for days in dry_days), key=len)
+
+    status["유목민 판정"] = " / ".join(best) if best else "조건 충족"
+
+    return status
+
+
+def detect_nomad_sell(
+    df,
+    surge_ratio=NOMAD_SURGE_RATIO,
+    dry_ratio=NOMAD_SELL_DRY_RATIO,
+    recent_days=NOMAD_RECENT_DAYS,
+    dry_days=NOMAD_DRY_DAYS,
+):
+    """
+    마지막 거래일 기준 유목민 매도 신호를 판정합니다. (매수 규칙의 대칭)
+
+    최근 3거래일 이내에 '전일 대비 거래량 2배 이상 + 하락'이 나오고,
+    그 뒤 1~2일 연속 양봉이면서 거래량이 줄면 매도 신호로 봅니다.
+
+    급감 기준은 매도 전용 상수(NOMAD_SELL_DRY_RATIO, 52%)를 씁니다.
+    매수 규칙의 기준을 그대로 쓰면 신호가 너무 적어
+    승률을 판단할 수 없기 때문입니다.
+    """
+    status = {
+        "유목민 매도": False,
+        "유목민 매도 폭등일": None,
+        "유목민 매도 양봉일": None,
+        "유목민 매도 양봉일수": None,
+        "유목민 매도 거래량배수": None,
+        "유목민 매도 급감비율": None,
+        "유목민 매도 폭등등락률": None,
+        "유목민 매도 양봉등락률": None,
+        "유목민 매도 판정": "",
+    }
+
+    if df is None or len(df) < 3 or not {"시가", "종가", "거래량"}.issubset(df.columns):
+        status["유목민 매도 판정"] = "판정에 필요한 데이터가 부족합니다."
+        return status
+
+    patterns = nomad_patterns(
+        df,
+        surge_ratio=surge_ratio,
+        dry_ratio=dry_ratio,
+        recent_days=recent_days,
+        dry_days=dry_days,
+        direction="sell",
+    )
+
+    last_row = patterns.iloc[-1]
+
+    if int(last_row["유목민신호"]) == 1:
+        status.update({
+            "유목민 매도": True,
+            "유목민 매도 폭등일": last_row["유목민 폭등일"],
+            "유목민 매도 양봉일": last_row["유목민 음봉일"],
+            "유목민 매도 양봉일수": int(last_row["유목민신호일수"]),
+            "유목민 매도 거래량배수": float(last_row["유목민 거래량배수"]),
+            "유목민 매도 급감비율": float(last_row["유목민 급감비율"]),
+            "유목민 매도 폭등등락률": float(last_row["유목민 폭등상승률"]),
+            "유목민 매도 양봉등락률": float(last_row["유목민 음봉등락률"]),
+            "유목민 매도 판정": "조건 충족",
+        })
+        return status
+
+    # 불충족 사유
+    volume = pd.to_numeric(df["거래량"], errors="coerce").to_numpy(dtype=float)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    last = len(df) - 1
+
+    def diagnose(days):
+        spike = last - days
+        base = spike - 1
+
+        if base < 0:
+            return ["비교할 과거 데이터 부족"]
+
+        if not np.isfinite(volume[base]) or volume[base] <= 0:
+            return ["거래량 결측"]
+
+        reasons = []
+
+        if volume[spike] < volume[base] * surge_ratio:
+            reasons.append(f"거래량 폭등 미달({volume[spike] / volume[base]:.2f}배)")
+
+        if close[spike] >= close[base]:
+            reasons.append("폭등일 하락 아님")
+
+        dry_slice = range(spike + 1, last + 1)
+        bullish = all(
+            np.isfinite(open_price[j]) and close[j] > open_price[j]
+            for j in dry_slice
+        )
+
+        if not bullish:
+            reasons.append("양봉 아님")
+
+        worst = max(volume[j] for j in dry_slice) / volume[spike] * 100
+
+        if worst > dry_ratio * 100:
+            reasons.append(
+                f"거래량 급감 미달({worst:.1f}% > {dry_ratio * 100:.0f}%)"
+            )
+
+        return reasons
+
+    best = min((diagnose(days) for days in dry_days), key=len)
+    status["유목민 매도 판정"] = " / ".join(best) if best else "조건 충족"
+
+    return status
+
+
+# =========================================================
+# 이동평균선 교차 (MA5 / MA20)
+# =========================================================
+
+def add_moving_average(
+    df,
+    fast=MA_FAST,
+    slow=MA_SLOW,
+    slope_lookback=MA_SLOPE_LOOKBACK,
+    block_flat_slope=False,
+):
+    """
+    단기·장기 단순이동평균과 교차 신호를 컬럼으로 추가합니다.
+
+    - MA5가 MA20을 상향 돌파한 날 -> 이동평균매수 = 1
+    - MA5가 MA20을 하향 돌파한 날 -> 이동평균매도 = 1
+    - 단, MA20 기울기가 0보다 작으면(하락 추세) 매수를 금지합니다.
+
+    교차 판정은 그날 종가로 계산된 이동평균값끼리 비교하며,
+    이동평균이 아직 계산되지 않는 초기 구간은 신호를 만들지 않습니다.
+    기울기는 MA20[오늘] - MA20[slope_lookback일 전] 으로 계산합니다.
+    금지된 교차는 '이동평균매수차단'에 1로 남겨 차트에서 구분해 볼 수 있습니다.
+    """
+    frame = df.copy()
+
+    if "종가" not in frame.columns:
+        return frame
+
+    close = pd.to_numeric(frame["종가"], errors="coerce")
+
+    frame[f"MA{fast}"] = close.rolling(fast, min_periods=fast).mean()
+    frame[f"MA{slow}"] = close.rolling(slow, min_periods=slow).mean()
+
+    fast_col = frame[f"MA{fast}"]
+    slow_col = frame[f"MA{slow}"]
+
+    ready = fast_col.notna() & slow_col.notna()
+
+    # 1: 단기가 위, 0: 단기가 아래, NaN: 계산 불가
+    above = (fast_col > slow_col).where(ready)
+
+    previous = above.shift(1)
+
+    buy_raw = (previous == 0) & (above == 1)
+    sell_raw = (previous == 1) & (above == 0)
+
+    # MA20 기울기: 0보다 작으면(하락) 매수 금지
+    slope = slow_col - slow_col.shift(slope_lookback)
+    frame[f"MA{slow}기울기"] = slope
+
+    blocked = slope.isna()
+
+    if block_flat_slope:
+        blocked = blocked | (slope <= 0)
+    else:
+        blocked = blocked | (slope < 0)
+
+    frame["이동평균매수"] = (buy_raw & ~blocked).astype(int)
+    frame["이동평균매수차단"] = (buy_raw & blocked).astype(int)
+    frame["이동평균매도"] = sell_raw.astype(int)
+
+    return frame
+
+
+def ma_signal_stats(
+    df,
+    horizons=NOMAD_FORWARD_DAYS,
+    fast=MA_FAST,
+    slow=MA_SLOW,
+):
+    """
+    이동평균 교차 신호가 난 뒤 5·10·20거래일 성과를 집계합니다.
+
+    - 진입: 신호 다음 거래일 시가
+    - 청산: 신호일 + N거래일 종가
+    - 비용: 왕복 TRADING_COST_PCT(0.3%p) 차감
+    - 매수는 상승, 매도는 하락이 승리이며 기준선도 같은 방향으로 계산
+    """
+    empty_block = {"신호수": 0, "요약": [], "신호목록": [], "방향": None}
+
+    result = {
+        "기간": None,
+        "보유기간": list(horizons),
+        "단기": fast,
+        "장기": slow,
+        "매수": dict(empty_block),
+        "매도": dict(empty_block),
+    }
+
+    if df is None or df.empty or not {"시가", "종가"}.issubset(df.columns):
+        return result
+
+    frame = add_moving_average(df, fast=fast, slow=slow)
+
+    close = pd.to_numeric(frame["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(frame["시가"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(frame.index)
+    count = len(frame)
+
+    result["기간"] = [
+        dates[0].strftime("%Y-%m-%d"),
+        dates[-1].strftime("%Y-%m-%d"),
+    ]
+
+    # 기준선: 방향별로 따로 계산 (매도는 '하락'이 승리)
+    base_by_direction = {1: {}, -1: {}}
+
+    for horizon in horizons:
+        samples = {1: [], -1: []}
+
+        for index in range(count - horizon - 1):
+            entry = open_price[index + 1]
+            exit_price = close[index + horizon]
+
+            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
+                signed = (exit_price / entry - 1.0) - TRADING_COST_RATE
+                samples[1].append(signed > 0)
+                samples[-1].append(-signed - TRADING_COST_RATE > 0)
+
+        for key in (1, -1):
+            base_by_direction[key][horizon] = (
+                round(float(np.mean(samples[key]) * 100), 1)
+                if samples[key]
+                else None
+            )
+
+    fast_col = f"MA{fast}"
+    slow_col = f"MA{slow}"
+
+    for label, column, direction in (
+        ("매수", "이동평균매수", 1),
+        ("매도", "이동평균매도", -1),
+    ):
+        baselines = base_by_direction[direction]
+        records = []
+
+        for index in np.flatnonzero(frame[column].to_numpy(dtype=int) == 1):
+            entry_index = index + 1
+
+            if entry_index >= count:
+                continue
+
+            entry = open_price[entry_index]
+
+            if not np.isfinite(entry) or entry <= 0:
+                continue
+
+            record = {
+                "신호일": dates[index].strftime("%Y-%m-%d"),
+                "진입일": dates[entry_index].strftime("%Y-%m-%d"),
+                "진입가": round(float(entry), 0),
+                fast_col: (
+                    round(float(frame[fast_col].iat[index]), 0)
+                    if np.isfinite(float(frame[fast_col].iat[index]))
+                    else None
+                ),
+                slow_col: (
+                    round(float(frame[slow_col].iat[index]), 0)
+                    if np.isfinite(float(frame[slow_col].iat[index]))
+                    else None
+                ),
+                "차트표시": bool(
+                    dates[index]
+                    >= dates[-1] - pd.DateOffset(months=NOMAD_CHART_MONTHS)
+                ),
+            }
+
+            for horizon in horizons:
+                exit_index = index + horizon
+                value = None
+
+                if exit_index < count and np.isfinite(close[exit_index]):
+                    value = round(
+                        (close[exit_index] / entry - 1.0) * 100.0 * direction
+                        - TRADING_COST_PCT,
+                        2,
+                    )
+
+                record[f"수익률{horizon}"] = value
+
+            records.append(record)
+
+        summary = []
+
+        for horizon in horizons:
+            values = [
+                r[f"수익률{horizon}"]
+                for r in records
+                if r[f"수익률{horizon}"] is not None
+            ]
+
+            summary.append({
+                "보유일수": horizon,
+                "표본": len(values),
+                "승률": (
+                    None
+                    if not values
+                    else round(float(np.mean([v > 0 for v in values]) * 100), 1)
+                ),
+                "평균": (
+                    None if not values else round(float(np.mean(values)), 2)
+                ),
+                "중앙값": (
+                    None if not values else round(float(np.median(values)), 2)
+                ),
+                "최선": None if not values else round(float(max(values)), 2),
+                "최악": None if not values else round(float(min(values)), 2),
+                "기준선": baselines.get(horizon),
+                "초과": (
+                    None
+                    if not values or baselines.get(horizon) is None
+                    else round(
+                        float(np.mean([v > 0 for v in values]) * 100)
+                        - baselines[horizon],
+                        1,
+                    )
+                ),
+            })
+
+        result[label] = {
+            "신호수": len(records),
+            "요약": summary,
+            "신호목록": records,
+            "방향": "매수" if direction == 1 else "매도(하락이 +)",
+        }
+
+    return result
+
+
+def analyze_frame(
+    frame,
+    stock_name,
+    excel_file=None,
+    recent_signal_days=7,
+):
+    """
+    가격 데이터와 재무 엑셀을 분석합니다.
+
+    latest의 주간·결합 신호:
+        마지막 거래일 하루의 신호가 아니라,
+        기준일 포함 최근 recent_signal_days일의 마지막 신호.
+
+    기존 app.py 호출과 호환됩니다.
+    """
+    if recent_signal_days < 1:
+        raise ValueError(
+            "최근 신호 조회 일수는 1 이상이어야 합니다."
+        )
+
+    df = prepare_price_frame(frame)
+    messages = []
+
+    # -----------------------------------------------------
+    # 재무 정보
+    # -----------------------------------------------------
+
+    if excel_file is not None and str(excel_file) != "":
+        validate_excel(
+            excel_file,
+            stock_name,
+        )
+
+        df = FinancialDataManager.add_quarter_and_target_price(
+            df,
+            excel_file,
+            stock_name,
+        )
+
+    else:
+        df["분기"] = df.index.map(
+            FinancialDataManager.get_quarter
+        )
+
+        df["목표가"] = np.nan
+        df["괴리율(%)"] = np.nan
+
+        messages.append(
+            "재무 엑셀이 없어 목표가·괴리율·영업이익은 "
+            "표시하지 않습니다."
+        )
+
+    # -----------------------------------------------------
+    # 지표와 신호
+    # -----------------------------------------------------
+
+    df = TechnicalIndicator.add_daily_macd(df)
+    df = TechnicalIndicator.add_weekly_macd(df)
+    df = TechnicalIndicator.add_monthly_macd(df)
+
+    df = SignalGenerator.add_signals(df)
+    df = add_nomad_signal(df)
+    df = add_nomad_sell_signal(df)
+    df = add_double_signal(df)
+    df = add_moving_average(df)
+
+    # -----------------------------------------------------
+    # 백테스트
+    # -----------------------------------------------------
+
+    strategies = [
+        (
+            "Weekly",
+            "주간 신호",
+            "Weekly",
+            None,
+            None,
+        ),
+        (
+            "Weekly+Monthly",
+            "주·월간 신호",
+            "Weekly_Monthly",
+            None,
+            None,
+        ),
+        (
+            "MA_Cross",
+            "이동평균 신호",
+            "MA_Cross",
+            "이동평균매수",
+            "이동평균매도",
+        ),
+    ]
+
+    trades = {}
+    metrics = []
+
+    for key, label, signal_type, buy_col, sell_col in strategies:
+        trade_frame = Backtester.backtest(
+            df,
+            signal_type=signal_type,
+            monthly_filter=None,
+            price_col="종가",
+            buy_col=buy_col,
+            sell_col=sell_col,
+        )
+
+        trades[key] = trade_frame
+
+        metrics.append(
+            Backtester.calculate_metrics(
+                trade_frame,
+                label,
+            )
+        )
+
+    # -----------------------------------------------------
+    # 최근 7일 신호
+    # -----------------------------------------------------
+
+    latest_row = df.iloc[-1]
+    reference_date = df.index[-1]
+
+    signal_start = (
+        reference_date
+        - pd.Timedelta(days=recent_signal_days - 1)
+    )
+
+    weekly_recent = get_recent_signal(
+        df,
+        buy_col="Weekly_Buy",
+        sell_col="Weekly_Sell",
+        days=recent_signal_days,
+        reference_date=reference_date,
+    )
+
+    combined_recent = get_recent_signal(
+        df,
+        buy_col="Weekly_Monthly_Buy",
+        sell_col="Weekly_Monthly_Sell",
+        days=recent_signal_days,
+        reference_date=reference_date,
+    )
+
+    # 전일 종가와 전일대비 등락률
+    previous_close = None
+    previous_close_date = None
+    change_pct = None
+
+    if len(df) >= 2:
+        previous_close = float(df["종가"].iloc[-2])
+        previous_close_date = df.index[-2].strftime("%Y-%m-%d")
+
+        if previous_close:
+            change_pct = (
+                float(latest_row["종가"]) / previous_close - 1.0
+            ) * 100.0
+
+    latest_status = {
+        "종목명": stock_name,
+        "기준일": reference_date.strftime("%Y-%m-%d"),
+        "종가": float(latest_row["종가"]),
+        "전일 종가": previous_close,
+        "전일 종가일": previous_close_date,
+        "전일대비(%)": (
+            round(change_pct, 2)
+            if change_pct is not None
+            else None
+        ),
+
+        # 기존 app.py가 읽는 키입니다.
+        # 최근 조회 기간 안에 발생한 마지막 신호를 반환합니다.
+        "Weekly 신호": weekly_recent["신호"],
+        "Weekly+Monthly 신호": combined_recent["신호"],
+
+        # 신호 발생일
+        "Weekly 신호일": weekly_recent["발생일"],
+        "Weekly+Monthly 신호일": combined_recent["발생일"],
+
+        # 조회 기간
+        "신호 조회 시작일": signal_start.strftime("%Y-%m-%d"),
+        "신호 조회 종료일": reference_date.strftime("%Y-%m-%d"),
+        "신호 조회 일수": recent_signal_days,
+
+        # 마지막 거래일 하루의 신호도 별도로 보존합니다.
+        "당일 Weekly 신호": classify_signal(
+            latest_row,
+            "Weekly_Buy",
+            "Weekly_Sell",
+        ),
+        "당일 Weekly+Monthly 신호": classify_signal(
+            latest_row,
+            "Weekly_Monthly_Buy",
+            "Weekly_Monthly_Sell",
+        ),
+
+        # 추세 신호등용 값: 마지막 거래일 기준
+        # (+1 상승 / -1 하락 / 0 보합 / None 계산 불가)
+        "Daily_Trend": trend_flag(latest_row, "Daily_Trend"),
+        "Weekly_Trend": trend_flag(latest_row, "Weekly_Trend"),
+        "Monthly_Trend": trend_flag(latest_row, "Monthly_Trend"),
+    }
+
+    # 유목민 매수(거래량 폭등 → 급감 음봉) 판정
+    latest_status.update(detect_nomad_buy(df))
+
+    # 최근 7일 이내 유목민 신호 (전체 결과 요약용)
+    recent_nomad = recent_nomad_signal(df)
+
+    latest_status["유목민 신호"] = recent_nomad["신호"]
+    latest_status["유목민 신호일"] = recent_nomad["발생일"]
+    latest_status["유목민 신호 음봉일수"] = recent_nomad["음봉일수"]
+    latest_status["유목민 신호 경과일"] = recent_nomad["경과일"]
+
+    # 유목민 매도(대칭 규칙) 판정 + 최근 7일 신호 + 성과
+    latest_status.update(detect_nomad_sell(df))
+
+    recent_nomad_sell = recent_nomad_signal(df, direction="sell")
+
+    latest_status["유목민 매도 신호"] = recent_nomad_sell["신호"]
+    latest_status["유목민 매도 신호일"] = recent_nomad_sell["발생일"]
+    latest_status["유목민 매도 신호 경과일"] = recent_nomad_sell["경과일"]
+
+    nomad_sell_stats = nomad_signal_stats(
+        df,
+        direction="sell",
+        dry_ratio=NOMAD_SELL_DRY_RATIO,
+    )
+
+    # 더블 패턴 5·10·20거래일 성과
+    double_stats = double_signal_stats(df)
+
+    # 이동평균(MA5/MA20) 교차 신호 5·10·20거래일 성과
+    ma_stats = ma_signal_stats(df)
+
+    # 최근 7일 이내 더블 탑(매도)·더블 바텀(매수) 신호
+    recent_double = recent_double_signal(df)
+
+    latest_status["더블 신호"] = recent_double["신호"]
+    latest_status["더블 패턴"] = recent_double["패턴"]
+    latest_status["더블 신호일"] = recent_double["발생일"]
+    latest_status["더블 경과일"] = recent_double["경과일"]
+    latest_status["더블 넥라인"] = recent_double["넥라인"]
+    latest_status["더블 이격(%)"] = recent_double["이격(%)"]
+
+    # 과거 신호의 5·10·20거래일 성과
+    nomad_stats = nomad_signal_stats(df)
+
+    return {
+        "data": df,
+        "metrics": pd.DataFrame(metrics),
+        "trades": trades,
+        "latest": latest_status,
+        "nomad_stats": nomad_stats,
+        "nomad_sell_stats": nomad_sell_stats,
+        "double_stats": double_stats,
+        "ma_stats": ma_stats,
+        "messages": messages,
+    }
