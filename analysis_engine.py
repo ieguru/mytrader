@@ -227,13 +227,13 @@ class TechnicalIndicator:
         """
         주간 MACD를 추가합니다.
 
-        기존 계산 방식을 유지합니다.
         같은 주의 날짜에는 해당 주의 마지막 가용 종가로
-        계산한 동일한 주간 값을 배정합니다.
+        계산한 동일한 주간 값을 배정합니다(표시용 값).
 
         주의:
-        주중 데이터가 추가되면 같은 주의 과거 값도
-        변경될 수 있습니다.
+        이 값에는 그 주 후반 정보가 섞여 있으므로 신호 판정에는
+        쓰지 않습니다. 신호는 maintain_weekly_trend()에서
+        '직전 완료 주봉'만으로 다시 계산합니다.
         """
         weekly = (
             df[["종가"]]
@@ -278,13 +278,13 @@ class TechnicalIndicator:
         """
         월간 MACD를 추가합니다.
 
-        기존 계산 방식을 유지합니다.
         같은 월의 날짜에는 해당 월의 마지막 가용 종가로
-        계산한 동일한 월간 값을 배정합니다.
+        계산한 동일한 월간 값을 배정합니다(표시용 값).
 
         주의:
-        월중 데이터가 추가되면 같은 월의 과거 값도
-        변경될 수 있습니다.
+        이 값에는 그 월 후반 정보가 섞여 있으므로 신호 판정에는
+        쓰지 않습니다. 신호는 maintain_monthly_trend()에서
+        '직전 완료 월봉'만으로 다시 계산합니다.
         """
         monthly = (
             df[["종가"]]
@@ -353,60 +353,68 @@ class SignalGenerator:
         return trend
 
     @staticmethod
-    def maintain_weekly_trend(df):
-        """주간 추세를 해당 주 전체에 동일하게 배정합니다."""
-        df = df.copy()
-        df["year_week"] = df.index.to_period("W-FRI")
+    def completed_period_trend(
+        df,
+        oscillator_col,
+        freq,
+        label,
+    ):
+        """
+        '직전에 확정된' 주봉·월봉 MACD만 사용해 추세를 배정합니다.
 
-        weekly_trend = (
-            df.groupby("year_week")["Weekly_Trend"]
-            .apply(
-                lambda values: (
-                    values.loc[values != 0].iloc[0]
-                    if (values != 0).any()
-                    else np.nan
-                )
-            )
-            .ffill()
+        기존 방식은 해당 주(월)의 마지막 가용 종가로 계산한 오실레이터를
+        그 주(월)의 첫 거래일에 이미 배정했습니다. 그래서 금요일에야
+        확정되는 주봉 값이 월요일에 신호로 찍히는 미래정보(look-ahead)가
+        있었습니다.
+
+        여기서는 각 주(월)의 확정 오실레이터 변화(+1/-1/0)를 한 칸 뒤로
+        밀어, 다음 주(월) 첫 거래일부터 반영합니다. 신호는 실제로 값을
+        알 수 있는 시점에만 발생합니다.
+        """
+        df = df.copy()
+
+        periods = df.index.to_period(freq)
+
+        per_period = (
+            df[oscillator_col]
+            .groupby(periods)
+            .last()
+        )
+
+        trend = SignalGenerator.calculate_trend(per_period)
+
+        # t[k]는 k주(월) 종가가 확정된 뒤에야 알 수 있으므로
+        # k+1주(월)부터 사용합니다.
+        known = trend.shift(1)
+
+        df[label] = (
+            known.reindex(periods)
             .fillna(0)
             .astype(int)
+            .to_numpy()
         )
 
-        df["Weekly_Trend"] = (
-            df["year_week"]
-            .map(weekly_trend)
-            .astype(int)
-        )
+        return df
 
-        return df.drop(columns=["year_week"])
+    @staticmethod
+    def maintain_weekly_trend(df):
+        """주간 추세를 '직전 완료 주봉' 기준으로 해당 주 전체에 배정합니다."""
+        return SignalGenerator.completed_period_trend(
+            df,
+            "Weekly_Oscillator",
+            "W-FRI",
+            "Weekly_Trend",
+        )
 
     @staticmethod
     def maintain_monthly_trend(df):
-        """월간 추세를 해당 월 전체에 동일하게 배정합니다."""
-        df = df.copy()
-        df["year_month"] = df.index.to_period("M")
-
-        monthly_trend = (
-            df.groupby("year_month")["Monthly_Trend"]
-            .apply(
-                lambda values: (
-                    values.loc[values != 0].iloc[0]
-                    if (values != 0).any()
-                    else np.nan
-                )
-            )
-            .ffill()
-            .fillna(0)
-            .astype(int)
+        """월간 추세를 '직전 완료 월봉' 기준으로 해당 월 전체에 배정합니다."""
+        return SignalGenerator.completed_period_trend(
+            df,
+            "Monthly_Oscillator",
+            "M",
+            "Monthly_Trend",
         )
-
-        df["Monthly_Trend"] = (
-            df["year_month"]
-            .map(monthly_trend)
-            .astype(int)
-        )
-
-        return df.drop(columns=["year_month"])
 
     @staticmethod
     def identify_signal_changes(trend_series):
@@ -2384,3 +2392,4 @@ def analyze_frame(
         "double_stats": double_stats,
         "messages": messages,
     }
+
