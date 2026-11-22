@@ -1357,8 +1357,8 @@ def collect_strategy_stats(result):
     entries = [
         ("유목민 매수", nomad, "신호 다음날 시가 진입"),
         ("유목민 매도", nomad_sell, "신호 다음날 시가 진입(하락이 +)"),
-        ("이동평균 매수", ma.get("매수"), "MA5가 MA20 상향 돌파 + MA20 기울기 0 이상일 때 다음날 시가 진입"),
-        ("이동평균 매도", ma.get("매도"), "MA5가 MA20 하향 돌파 다음날 시가 진입(하락이 +)"),
+        ("이동평균 매수", ma.get("매수"), "MA2가 MA20 상향 돌파(MA20 기울기 0 이상) 다음날 시가 진입 — 상승이 +"),
+        ("이동평균 매도", ma.get("매도"), "음봉이 5일선 아래로 내려온 다음날 시가 진입 — 하락이 +"),
         ("쌍바닥 매수", bottom, "넥라인 돌파 다음날 시가 진입"),
         ("쌍고점 매도", top, "넥라인 이탈 다음날 시가 진입(하락이 +)"),
     ]
@@ -2029,6 +2029,26 @@ def make_trade_table(trades, strategy):
         columns=["전략"],
         errors="ignore",
     )
+
+    # 거래기록은 최신순(최근 청산 → 과거)으로 보여줍니다.
+    for sort_column in ("매도일", "매수일"):
+        if sort_column in table.columns:
+            order = pd.to_datetime(
+                table[sort_column],
+                errors="coerce",
+            )
+
+            table = (
+                table.assign(_정렬기준=order)
+                .sort_values(
+                    "_정렬기준",
+                    ascending=False,
+                    na_position="last",
+                )
+                .drop(columns="_정렬기준")
+                .reset_index(drop=True)
+            )
+            break
 
     if strategy == "Weekly":
         table = table.drop(

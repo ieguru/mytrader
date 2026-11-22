@@ -1231,8 +1231,9 @@ NOMAD_SELL_DRY_RATIO = 0.52  # 매도 전용 급감 기준(매수 30%와 별도)
 NOMAD_CHART_MONTHS = 18    # charts.DISPLAY_MONTHS와 같아야 합니다(차트 표시 구간)
 NOMAD_RECENT_WINDOW = 7    # 전체 결과 요약에서 '최근 신호'로 볼 기간(달력일)
 
-MA_FAST = 5                # 이동평균 단기
-MA_SLOW = 20               # 이동평균 장기
+MA_FAST = 2                # 매수 교차 단기선(2일선)
+MA_SLOW = 20               # 매수 교차 장기선(20일선) · 기울기 기준
+MA_SELL = 5                # 매도 기준선(5일선)
 MA_SLOPE_LOOKBACK = 1      # MA20 기울기 비교 간격(거래일)
 
 
@@ -2297,12 +2298,13 @@ def add_moving_average(
     slow=MA_SLOW,
     slope_lookback=MA_SLOPE_LOOKBACK,
     block_flat_slope=False,
+    sell_ma=MA_SELL,
 ):
     """
     단기·장기 단순이동평균과 교차 신호를 컬럼으로 추가합니다.
 
-    - MA5가 MA20을 상향 돌파한 날 -> 이동평균매수 = 1
-    - MA5가 MA20을 하향 돌파한 날 -> 이동평균매도 = 1
+    - MA2가 MA20을 상향 돌파한 날 -> 이동평균매수 = 1
+    - 일봉이 음봉이면서 종가가 MA5 아래로 내려온 날 -> 이동평균매도 = 1
     - 단, MA20 기울기가 0보다 작으면(하락 추세) 매수를 금지합니다.
 
     교차 판정은 그날 종가로 계산된 이동평균값끼리 비교하며,
@@ -2320,6 +2322,12 @@ def add_moving_average(
     frame[f"MA{fast}"] = close.rolling(fast, min_periods=fast).mean()
     frame[f"MA{slow}"] = close.rolling(slow, min_periods=slow).mean()
 
+    if f"MA{sell_ma}" in frame.columns:
+        sell_ma_col = pd.to_numeric(frame[f"MA{sell_ma}"], errors="coerce")
+    else:
+        sell_ma_col = close.rolling(sell_ma, min_periods=sell_ma).mean()
+        frame[f"MA{sell_ma}"] = sell_ma_col
+
     fast_col = frame[f"MA{fast}"]
     slow_col = frame[f"MA{slow}"]
 
@@ -2331,7 +2339,17 @@ def add_moving_average(
     previous = above.shift(1)
 
     buy_raw = (previous == 0) & (above == 1)
-    sell_raw = (previous == 1) & (above == 0)
+
+    # 매도: 음봉(종가 < 시가)이면서 종가가 MA5 아래로 내려온 첫날
+    if "시가" in frame.columns:
+        open_price = pd.to_numeric(frame["시가"], errors="coerce")
+    else:
+        open_price = close
+
+    below_sell_ma = (close < sell_ma_col).where(sell_ma_col.notna())
+    bearish = close < open_price
+    sell_condition = bearish & below_sell_ma.fillna(False)
+    sell_raw = sell_condition & ~sell_condition.shift(1).fillna(False)
 
     # MA20 기울기: 0보다 작으면(하락) 매수 금지
     slope = slow_col - slow_col.shift(slope_lookback)
