@@ -136,6 +136,11 @@ class FinancialDataManager:
 # 기술적 지표
 # =========================================================
 
+# 매매 비용 (왕복): 수수료 + 거래세 + 슬리피지 가정
+TRADING_COST_RATE = 0.003      # 0.3% (비율)
+TRADING_COST_PCT = 0.30        # 0.3% (퍼센트 포인트)
+
+
 class TechnicalIndicator:
     """기술적 지표 계산 클래스"""
 
@@ -626,17 +631,56 @@ class Backtester:
         signal_type="Weekly",
         monthly_filter=None,
         price_col="종가",
+        execution="next_open",
+        cost=TRADING_COST_PCT,
     ):
         """
-        신호 발생일 종가로 매수·매도합니다.
+        신호 다음 거래일 시가로 매수·매도합니다.
 
-        기존 방식 유지:
+        신호는 그날 '종가'가 확정된 뒤에야 알 수 있으므로, 종가에
+        체결하는 것은 실제로 주문할 수 없는 시점입니다(반나절 빠른
+        낙관 편향). 기본값(execution="next_open")은 다음 거래일
+        시가에 체결합니다. execution="close"로 두면 옛 방식대로
+        신호일 종가에 체결합니다.
+
+        비용:
+        - 수익률에서 왕복 비용(cost, 기본 0.3%p)을 차감합니다.
+        - cost=0 으로 두면 비용 없는 옛 계산과 같습니다.
+
+        유지되는 규칙:
         - 한 번에 한 포지션만 보유
         - 미청산 포지션은 거래 내역에서 제외
-        - 수수료·세금·슬리피지 제외
         """
         df = df.copy()
         trades = []
+
+        # 체결 좌표(체결일, 체결가)를 미리 계산합니다.
+        # next_open: 신호일 '다음' 거래일 시가 / close: 신호일 종가
+        bars = []
+        open_price = (
+            pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+            if "시가" in df.columns
+            else np.full(len(df), np.nan)
+        )
+        close_price = pd.to_numeric(
+            df[price_col], errors="coerce"
+        ).to_numpy(dtype=float)
+
+        for index in range(len(df)):
+            if execution == "next_open":
+                following = index + 1
+                if (
+                    following < len(df)
+                    and np.isfinite(open_price[following])
+                    and open_price[following] > 0
+                ):
+                    bars.append((df.index[following], float(open_price[following])))
+                else:
+                    bars.append((None, None))
+            elif np.isfinite(close_price[index]) and close_price[index] > 0:
+                bars.append((df.index[index], float(close_price[index])))
+            else:
+                bars.append((None, None))
 
         buy_col = f"{signal_type}_Buy"
         sell_col = f"{signal_type}_Sell"
@@ -650,11 +694,25 @@ class Backtester:
             exit_price,
             reason,
         ):
-            profit_rate = (
+            # 매수일의 분기 목표가(엑셀 기준)를 함께 남깁니다.
+            target_price = None
+
+            if "목표가" in df.columns:
+                try:
+                    candidate = df.at[entry_date, "목표가"]
+                    target_price = float(candidate)
+                except (KeyError, TypeError, ValueError):
+                    target_price = None
+
+            gross_rate = (
                 (exit_price - entry_price)
                 / entry_price
                 * 100
             )
+
+            # 왕복 비용(수수료·세금·슬리피지)을 차감합니다.
+            profit_rate = gross_rate - cost
+            cost_amount = entry_price * (cost / 100.0)
 
             return {
                 "전략": (
@@ -663,11 +721,17 @@ class Backtester:
                 ),
                 "매수일": entry_date,
                 "매수가": round(entry_price, 0),
+                "목표가": (
+                    round(float(target_price), 0)
+                    if target_price is not None
+                    and np.isfinite(target_price)
+                    else None
+                ),
                 "매도일": exit_date,
                 "매도가": round(exit_price, 0),
                 "수익률(%)": round(profit_rate, 2),
                 "수익(원)": round(
-                    exit_price - entry_price,
+                    exit_price - entry_price - cost_amount,
                     0,
                 ),
                 "보유기간(일)": (
@@ -677,8 +741,7 @@ class Backtester:
             }
 
         for index in range(len(df)):
-            current_date = df.index[index]
-            current_price = df[price_col].iloc[index]
+            exec_date, exec_price = bars[index]
 
             if monthly_filter is not None:
                 current_monthly = (
@@ -686,11 +749,15 @@ class Backtester:
                 )
 
                 if current_monthly != monthly_filter:
-                    if in_position:
+                    if (
+                        in_position
+                        and exec_date is not None
+                        and exec_date > entry_date
+                    ):
                         trades.append(
                             make_trade(
-                                current_date,
-                                current_price,
+                                exec_date,
+                                exec_price,
                                 "Monthly_Trend 변화",
                             )
                         )
@@ -703,18 +770,24 @@ class Backtester:
                 df[buy_col].iloc[index] == 1
                 and not in_position
             ):
-                entry_date = current_date
-                entry_price = current_price
+                if exec_date is None:
+                    continue
+
+                entry_date = exec_date
+                entry_price = exec_price
                 in_position = True
 
             elif (
                 df[sell_col].iloc[index] == 1
                 and in_position
             ):
+                if exec_date is None or exec_date <= entry_date:
+                    continue
+
                 trades.append(
                     make_trade(
-                        current_date,
-                        current_price,
+                        exec_date,
+                        exec_price,
                         "신호",
                     )
                 )
@@ -1371,7 +1444,8 @@ def nomad_signal_stats(
 
     - 진입: 신호 다음 거래일 시가 (신호는 종가 확정 후 알 수 있으므로)
     - 청산: 신호일 + N거래일 종가
-    - 기준선: 같은 진입 규칙으로 전 구간 아무 날에나 진입했을 때의
+    - 비용: 왕복 TRADING_COST_PCT(0.3%p)를 차감합니다.
+    - 기준선: 같은 진입·비용 규칙으로 전 구간 아무 날에나 진입했을 때의
       상승 비율. 이보다 낮으면 신호에 우위가 없다는 뜻입니다.
     """
     empty = {
@@ -1446,7 +1520,10 @@ def nomad_signal_stats(
 
             if exit_index < count and np.isfinite(close[exit_index]):
                 sign = -1.0 if direction == "sell" else 1.0
-                value = (close[exit_index] / entry - 1.0) * 100.0 * sign
+                value = (
+                    (close[exit_index] / entry - 1.0) * 100.0 * sign
+                    - TRADING_COST_PCT
+                )
 
             record[f"수익률{horizon}"] = None if value is None else round(value, 2)
 
@@ -1463,12 +1540,20 @@ def nomad_signal_stats(
 
         baseline_values = []
 
+        # 기준선도 신호와 같은 방향으로 계산합니다.
+        # 매도 신호의 승리는 '하락'이므로, 상승 비율을 그대로 쓰면
+        # 승률과 기준선이 서로 반대 방향이 되어 초과가 왜곡됩니다.
+        baseline_sign = -1.0 if direction == "sell" else 1.0
+
         for index in range(count - horizon - 1):
             entry = open_price[index + 1]
             exit_price = close[index + horizon]
 
             if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
-                baseline_values.append(exit_price / entry - 1.0)
+                baseline_values.append(
+                    (exit_price / entry - 1.0) * baseline_sign
+                    - TRADING_COST_RATE
+                )
 
         baseline = (
             sum(1 for value in baseline_values if value > 0) / len(baseline_values) * 100
@@ -1770,7 +1855,8 @@ def double_signal_stats(df, horizons=NOMAD_FORWARD_DAYS, **kwargs):
     """
     더블 바닥(매수)·더블 탑(매도) 신호 이후 5·10·20거래일 성과를 집계합니다.
 
-    진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가입니다.
+    진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가이며
+    왕복 비용 TRADING_COST_PCT(0.3%p)를 차감합니다.
     쌍고점(매도)은 '매도가 유리했는지'를 보기 위해 수익률 부호를 뒤집어
     (하락하면 +) 집계합니다.
     """
@@ -1792,22 +1878,28 @@ def double_signal_stats(df, horizons=NOMAD_FORWARD_DAYS, **kwargs):
 
     empty["기간"] = [dates[0].strftime("%Y-%m-%d"), dates[-1].strftime("%Y-%m-%d")]
 
-    # 기준선: 같은 진입 규칙으로 아무 날에나 진입했을 때의 상승 비율
-    baselines = {}
+    # 기준선: 같은 진입 규칙으로 아무 날에나 진입했을 때의 승리 비율.
+    # 매수는 '상승', 매도는 '하락'이 승리이므로 방향별로 따로 계산합니다.
+    base_by_direction = {1: {}, -1: {}}
 
     for horizon in horizons:
-        values = []
+        samples = {1: [], -1: []}
 
         for index in range(count - horizon - 1):
             entry = open_price[index + 1]
             exit_price = close[index + horizon]
 
             if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
-                values.append(exit_price > entry)
+                signed = (exit_price / entry - 1.0) - TRADING_COST_RATE
+                samples[1].append(signed > 0)
+                samples[-1].append(-signed - TRADING_COST_RATE > 0)
 
-        baselines[horizon] = (
-            round(float(np.mean(values) * 100), 1) if values else None
-        )
+        for key in (1, -1):
+            base_by_direction[key][horizon] = (
+                round(float(np.mean(samples[key]) * 100), 1)
+                if samples[key]
+                else None
+            )
 
     result = {"기간": empty["기간"], "보유기간": list(horizons)}
 
@@ -1815,6 +1907,7 @@ def double_signal_stats(df, horizons=NOMAD_FORWARD_DAYS, **kwargs):
         ("쌍바닥", "쌍바닥", "쌍바닥신호", 1),
         ("쌍고점", "쌍고점", "쌍고점신호", -1),
     ):
+        baselines = base_by_direction[direction]
         records = []
 
         for index in np.flatnonzero(patterns[column].to_numpy(dtype=int) == 1):
@@ -1842,7 +1935,10 @@ def double_signal_stats(df, horizons=NOMAD_FORWARD_DAYS, **kwargs):
                 value = None
 
                 if exit_index < count and np.isfinite(close[exit_index]):
-                    value = (close[exit_index] / entry - 1) * 100 * direction
+                    value = (
+                        (close[exit_index] / entry - 1) * 100 * direction
+                        - TRADING_COST_PCT
+                    )
 
                 record[f"수익률{horizon}"] = None if value is None else round(value, 2)
 
@@ -2235,12 +2331,12 @@ def analyze_frame(
     strategies = [
         (
             "Weekly",
-            "Weekly 단독",
+            "주간 신호",
             "Weekly",
         ),
         (
             "Weekly+Monthly",
-            "Weekly+Monthly 결합",
+            "주·월간 신호",
             "Weekly_Monthly",
         ),
     ]

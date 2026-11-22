@@ -1394,7 +1394,6 @@ def render_nomad_stats(results):
     st.markdown("#### 📊 패턴별 신호 성과 비교")
 
     rows = []
-    pooled = {}
 
     for name, label, data, note in per_stock:
         summary = {item["보유일수"]: item for item in data.get("요약", [])}
@@ -1407,39 +1406,7 @@ def render_nomad_stats(results):
 
         rows.append(row)
 
-        bucket = pooled.setdefault(label, {h: [] for h in horizons})
-        for record in data.get("신호목록", []):
-            for horizon in horizons:
-                value = record.get(f"수익률{horizon}")
-                if value is not None:
-                    bucket[horizon].append(value)
-
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
-    compare = []
-
-    for label, data in pooled.items():
-        totals = sum(
-            d.get("신호수", 0) for _, l, d, _ in per_stock if l == label
-        )
-        row = {"전략": label, "신호수": totals}
-
-        for horizon in horizons:
-            values = data[horizon]
-            row[f"{horizon}일 승률"] = rate(
-                float(np.mean([v > 0 for v in values]) * 100) if values else None
-            )
-            row[f"{horizon}일 평균"] = pct(
-                float(np.mean(values)) if values else None
-            )
-
-        compare.append(row)
-
-    if len(pooled) > 1:
-        st.markdown("**전략 통합 (3종목 이상 합산)**")
-        st.dataframe(
-            pd.DataFrame(compare), hide_index=True, use_container_width=True
-        )
 
     baselines = {}
 
@@ -1452,22 +1419,12 @@ def render_nomad_stats(results):
         f"{h}일 {np.mean(v):.1f}%" for h, v in sorted(baselines.items()) if v
     )
 
-    st.warning(
-        "**더블 패턴(쌍바닥·쌍고점)은 참고용입니다 — 측정 결과 우위가 없습니다.** "
-        "8종목 3년(976거래일) 실데이터에서 쌍바닥 매수는 5·10·20일 승률 "
-        "47%·50%·51%로 기준선(51.8%·53.8%·57.7%)을 넘지 못했습니다. "
-        "쌍고점 매도는 신호 뒤 가격이 오히려 오르는 경우가 많아 매도 신호로 쓸 수 없습니다. "
-        "넥라인 돌파 시 거래량 1.2·1.5·2.0배 확인 필터를 붙여도 승률이 "
-        "기준선을 넘지 못했습니다(오차범위 ±12~17%p). "
-        "차트 마커와 표시는 패턴 위치를 눈으로 확인하는 용도로만 유지합니다.",
-        icon="⚠️",
-    )
-
     st.caption(
-        "진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가 기준입니다. "
-        "쌍고점(매도)은 하락한 경우를 +로 계산했습니다. "
-        "기준선은 같은 규칙으로 아무 날에나 진입했을 때의 상승 비율이며, "
-        "승률이 기준선을 넘지 못하면 신호에 우위가 없다는 뜻입니다."
+        "진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가 기준이며 "
+        "왕복 비용 0.3%를 뺀 값입니다. "
+        "**매수 신호(유목민 매수·쌍바닥)는 상승이, 매도 신호(유목민 매도·쌍고점)는 하락이 승리**입니다. "
+        "기준선도 같은 방향으로 계산합니다(매수=무작위 진입 시 상승 비율, 매도=하락 비율). "
+        "승률과 평균은 모두 매수 관점 손익(매도는 하락을 +)으로 표시했습니다."
         + (f" · 기준선: {baseline_text}" if baseline_text else "")
     )
 
@@ -1764,9 +1721,9 @@ def render_results_overview(results):
         '<th>종목</th>'
         '<th>유목민 신호</th>'
         '<th>더블 패턴<span class="th-note">참고</span></th>'
-        '<th>최근 주간신호</th>'
-        '<th>최근 주간·월간신호</th>'
-        '<th>일간/주간/월간 추세</th>'
+        '<th>주간 신호</th>'
+        '<th>주·월간 신호</th>'
+        '<th>일·주·월간 신호</th>'
         '</tr></thead><tbody>'
         + "".join(rows)
         + '</tbody></table></div>'
@@ -2092,6 +2049,7 @@ def make_trade_table(trades, strategy):
 
     numeric_columns = (
         "매수가",
+        "목표가",
         "매도가",
         "수익(원)",
         "수익률(%)",
@@ -2107,6 +2065,7 @@ def make_trade_table(trades, strategy):
         column: "{:,.0f}"
         for column in (
             "매수가",
+            "목표가",
             "매도가",
             "수익(원)",
         )
@@ -2300,7 +2259,7 @@ def render_stock_result(result, position):
 
     with double_column:
         render_signal_card(
-            title="더블 패턴 (참고)",
+            title="더블패턴 신호",
             signal=latest.get(
                 "더블 신호",
                 "신호 없음",
@@ -2313,7 +2272,7 @@ def render_stock_result(result, position):
 
     with weekly_column:
         render_signal_card(
-            title="최근 주간신호",
+            title="주간 신호",
             signal=latest.get(
                 "Weekly 신호",
                 "신호 없음",
@@ -2326,7 +2285,7 @@ def render_stock_result(result, position):
 
     with combined_column:
         render_signal_card(
-            title="최근 주간·월간신호",
+            title="주·월간 신호",
             signal=latest.get(
                 "Weekly+Monthly 신호",
                 "신호 없음",
@@ -2346,7 +2305,7 @@ def render_stock_result(result, position):
 
     st.markdown("### 최근 매매 신호")
 
-    st.markdown("**주간 단독 신호**")
+    st.markdown("**주간 신호**")
 
     weekly_signals = result["weekly_signals"].head(
         RECENT_SIGNAL_LIMIT
@@ -2365,7 +2324,7 @@ def render_stock_result(result, position):
             use_container_width=True,
         )
 
-    st.markdown("**주간·월간 결합 신호**")
+    st.markdown("**주·월간 신호**")
 
     combined_signals = result["combined_signals"].head(
         RECENT_SIGNAL_LIMIT
@@ -2374,7 +2333,7 @@ def render_stock_result(result, position):
     if combined_signals.empty:
         st.info(
             "해당 기간에 발생한 "
-            "주간·월간 결합 신호가 없습니다."
+            "주·월간 신호가 없습니다."
         )
 
     else:
@@ -2461,8 +2420,8 @@ def render_stock_result(result, position):
     st.markdown("### 거래 기록")
 
     strategy_names = {
-        "Weekly": "주간 단독 전략",
-        "Weekly+Monthly": "주간·월간 결합 전략",
+        "Weekly": "주간 신호",
+        "Weekly+Monthly": "주·월간 신호",
     }
 
     trades_by_strategy = result.get(
@@ -2493,7 +2452,7 @@ def render_stock_result(result, position):
         )
 
         with st.expander(
-            f"{label} 거래 기록",
+            f"{label} 거래기록",
             expanded=False,
         ):
             if trades.empty:
