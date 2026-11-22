@@ -1477,10 +1477,10 @@ def nomad_signal_stats(
 # =========================================================
 
 DOUBLE_PIVOT = 5            # 좌우 5봉보다 높으면(낮으면) 확정 고점(저점)
-DOUBLE_TOLERANCE = 0.03     # 두 고점(저점) 가격 차이 3% 이내
+DOUBLE_TOLERANCE = 0.015    # 두 고점(저점) 가격 차이 1.5% 이내 (스윕 결과 반영)
 DOUBLE_MIN_GAP = 8          # 두 봉 사이 최소 간격(거래일)
 DOUBLE_MAX_GAP = 90         # 두 봉 사이 최대 간격(거래일)
-DOUBLE_MIN_DEPTH = 0.02     # 두 고점(저점) 사이 골(산)이 2% 이상이어야 인정
+DOUBLE_MIN_DEPTH = 0.03     # 두 고점(저점) 사이 골(산)이 3% 이상이어야 인정 (스윕 결과 반영)
 DOUBLE_CONFIRM_WINDOW = 60  # 두 번째 봉 이후 넥라인 돌파를 기다리는 최대 봉수
 DOUBLE_COOLDOWN = 10        # 같은 패턴 신호의 최소 간격(거래일)
 DOUBLE_RECENT_WINDOW = 7    # 요약 화면에서 '최근 신호'로 볼 기간(달력일)
@@ -1726,6 +1726,122 @@ def add_double_signal(df, **kwargs):
     frame["쌍바닥신호"] = patterns["쌍바닥신호"].to_numpy()
 
     return frame
+
+
+def double_signal_stats(df, horizons=NOMAD_FORWARD_DAYS, **kwargs):
+    """
+    더블 바닥(매수)·더블 탑(매도) 신호 이후 5·10·20거래일 성과를 집계합니다.
+
+    진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가입니다.
+    쌍고점(매도)은 '매도가 유리했는지'를 보기 위해 수익률 부호를 뒤집어
+    (하락하면 +) 집계합니다.
+    """
+    empty = {
+        "기간": None,
+        "보유기간": list(horizons),
+        "쌍바닥": {"신호수": 0, "요약": [], "신호목록": []},
+        "쌍고점": {"신호수": 0, "요약": [], "신호목록": []},
+    }
+
+    if df is None or df.empty or not {"고가", "저가", "종가", "시가"}.issubset(df.columns):
+        return empty
+
+    patterns = detect_double_patterns(df, **kwargs)
+    close = pd.to_numeric(df["종가"], errors="coerce").to_numpy(dtype=float)
+    open_price = pd.to_numeric(df["시가"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(df.index)
+    count = len(df)
+
+    empty["기간"] = [dates[0].strftime("%Y-%m-%d"), dates[-1].strftime("%Y-%m-%d")]
+
+    # 기준선: 같은 진입 규칙으로 아무 날에나 진입했을 때의 상승 비율
+    baselines = {}
+
+    for horizon in horizons:
+        values = []
+
+        for index in range(count - horizon - 1):
+            entry = open_price[index + 1]
+            exit_price = close[index + horizon]
+
+            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
+                values.append(exit_price > entry)
+
+        baselines[horizon] = (
+            round(float(np.mean(values) * 100), 1) if values else None
+        )
+
+    result = {"기간": empty["기간"], "보유기간": list(horizons)}
+
+    for label, prefix, column, direction in (
+        ("쌍바닥", "쌍바닥", "쌍바닥신호", 1),
+        ("쌍고점", "쌍고점", "쌍고점신호", -1),
+    ):
+        records = []
+
+        for index in np.flatnonzero(patterns[column].to_numpy(dtype=int) == 1):
+            entry_index = index + 1
+
+            if entry_index >= count or not np.isfinite(open_price[entry_index]):
+                continue
+
+            entry = float(open_price[entry_index])
+
+            if entry <= 0:
+                continue
+
+            record = {
+                "신호일": dates[index].strftime("%Y-%m-%d"),
+                "진입일": dates[entry_index].strftime("%Y-%m-%d"),
+                "진입가": round(entry, 0),
+                "넥라인": float(patterns[f"{prefix} 넥라인"].iat[index]),
+                "이격(%)": float(patterns[f"{prefix} 이격"].iat[index]),
+                "차트표시": bool(dates[index] >= dates[-1] - pd.DateOffset(months=NOMAD_CHART_MONTHS)),
+            }
+
+            for horizon in horizons:
+                exit_index = index + horizon
+                value = None
+
+                if exit_index < count and np.isfinite(close[exit_index]):
+                    value = (close[exit_index] / entry - 1) * 100 * direction
+
+                record[f"수익률{horizon}"] = None if value is None else round(value, 2)
+
+            records.append(record)
+
+        summary = []
+
+        for horizon in horizons:
+            values = [r[f"수익률{horizon}"] for r in records if r[f"수익률{horizon}"] is not None]
+            summary.append({
+                "보유일수": horizon,
+                "표본": len(values),
+                "승률": None if not values else round(float(np.mean([v > 0 for v in values]) * 100), 1),
+                "평균": None if not values else round(float(np.mean(values)), 2),
+                "중앙값": None if not values else round(float(np.median(values)), 2),
+                "최선": None if not values else round(float(max(values)), 2),
+                "최악": None if not values else round(float(min(values)), 2),
+                "기준선": baselines.get(horizon),
+                "초과": (
+                    None
+                    if not values or baselines.get(horizon) is None
+                    else round(
+                        float(np.mean([v > 0 for v in values]) * 100)
+                        - baselines[horizon],
+                        1,
+                    )
+                ),
+            })
+
+        result[label] = {
+            "신호수": len(records),
+            "요약": summary,
+            "신호목록": records,
+            "방향": "매수" if direction == 1 else "매도(하락이 +)",
+        }
+
+    return result
 
 
 def recent_double_signal(df, days=DOUBLE_RECENT_WINDOW):
@@ -2101,6 +2217,9 @@ def analyze_frame(
     latest_status["유목민 신호 음봉일수"] = recent_nomad["음봉일수"]
     latest_status["유목민 신호 경과일"] = recent_nomad["경과일"]
 
+    # 더블 패턴 5·10·20거래일 성과
+    double_stats = double_signal_stats(df)
+
     # 최근 7일 이내 더블 탑(매도)·더블 바텀(매수) 신호
     recent_double = recent_double_signal(df)
 
@@ -2120,5 +2239,6 @@ def analyze_frame(
         "trades": trades,
         "latest": latest_status,
         "nomad_stats": nomad_stats,
+        "double_stats": double_stats,
         "messages": messages,
     }

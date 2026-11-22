@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import math
+import numpy as np
 import os
 import re
 import uuid
@@ -1276,18 +1277,40 @@ def render_nomad_buy_table(results):
     )
 
 
-def render_nomad_stats(results):
-    """유목민 신호 이후 5·10·20거래일 승률과 평균 수익률을 요약합니다."""
-    stats = [
-        (result["stock_name"], result.get("nomad_stats") or {})
-        for result in results
-    ]
-    stats = [(name, data) for name, data in stats if data.get("신호수")]
+def collect_strategy_stats(result):
+    """한 종목의 유목민·쌍바닥·쌍고점 성과를 같은 형태로 꺼냅니다."""
+    nomad = result.get("nomad_stats") or {}
+    double = result.get("double_stats") or {}
+    bottom = (double.get("쌍바닥") or {})
+    top = (double.get("쌍고점") or {})
 
-    if not stats:
+    entries = [
+        ("유목민 매수", nomad, "신호 다음날 시가 진입"),
+        ("쌍바닥 매수", bottom, "넥라인 돌파 다음날 시가 진입"),
+        ("쌍고점 매도", top, "넥라인 이탈 다음날 시가 진입(하락이 +)"),
+    ]
+
+    return [
+        (label, data, note)
+        for label, data, note in entries
+        if isinstance(data, dict) and data.get("신호수")
+    ]
+
+
+def render_nomad_stats(results):
+    """패턴별 신호 이후 5·10·20거래일 승률을 한 표에서 비교합니다."""
+    per_stock = []
+
+    for result in results:
+        for label, data, note in collect_strategy_stats(result):
+            per_stock.append((result["stock_name"], label, data, note))
+
+    if not per_stock:
         return
 
-    horizons = stats[0][1].get("보유기간") or [5, 10, 20]
+    horizons = per_stock[0][2].get("요약") and [
+        item["보유일수"] for item in per_stock[0][2]["요약"]
+    ] or [5, 10, 20]
 
     def rate(value):
         return "-" if value is None else f"{value:.0f}%"
@@ -1295,18 +1318,17 @@ def render_nomad_stats(results):
     def pct(value):
         return "-" if value is None else f"{value:+.1f}%"
 
+    def excess(value):
+        return "-" if value is None else f"{value:+.0f}%p"
+
+    st.markdown("#### 📊 패턴별 신호 성과 비교")
+
     rows = []
-    pooled = {horizon: [] for horizon in horizons}
+    pooled = {}
 
-    for name, data in stats:
-        summary = {
-            item["보유일수"]: item for item in data.get("요약", [])
-        }
-
-        row = {"종목": name, "신호수(전체)": data.get("신호수", 0)}
-
-        chart_months = data.get("차트개월") or 18
-        row[f"차트표시({chart_months}개월)"] = data.get("차트신호수", 0)
+    for name, label, data, note in per_stock:
+        summary = {item["보유일수"]: item for item in data.get("요약", [])}
+        row = {"종목": name, "전략": label, "신호수": data.get("신호수", 0)}
 
         for horizon in horizons:
             item = summary.get(horizon, {})
@@ -1315,91 +1337,69 @@ def render_nomad_stats(results):
 
         rows.append(row)
 
+        bucket = pooled.setdefault(label, {h: [] for h in horizons})
         for record in data.get("신호목록", []):
             for horizon in horizons:
                 value = record.get(f"수익률{horizon}")
-
                 if value is not None:
-                    pooled[horizon].append(value)
+                    bucket[horizon].append(value)
 
-    if len(stats) > 1:
-        row = {
-            "종목": f"전체 {len(stats)}종목",
-            "신호수(전체)": sum(data.get("신호수", 0) for _, data in stats),
-            "차트표시(18개월)": sum(
-                data.get("차트신호수", 0) for _, data in stats
-            ),
-        }
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    compare = []
+
+    for label, data in pooled.items():
+        totals = sum(
+            d.get("신호수", 0) for _, l, d, _ in per_stock if l == label
+        )
+        row = {"전략": label, "신호수": totals}
 
         for horizon in horizons:
-            values = pooled[horizon]
-            wins = sum(1 for value in values if value > 0)
+            values = data[horizon]
             row[f"{horizon}일 승률"] = rate(
-                wins / len(values) * 100 if values else None
+                float(np.mean([v > 0 for v in values]) * 100) if values else None
             )
             row[f"{horizon}일 평균"] = pct(
-                sum(values) / len(values) if values else None
+                float(np.mean(values)) if values else None
             )
 
-        rows.append(row)
+        compare.append(row)
 
-    st.markdown("#### 🐪 유목민 신호 성과 검증")
-    st.dataframe(
-        pd.DataFrame(rows),
-        hide_index=True,
-        use_container_width=True,
-    )
-
-    baselines = []
-
-    for horizon in horizons:
-        values = [
-            {item["보유일수"]: item for item in data.get("요약", [])}
-            .get(horizon, {})
-            .get("기준선")
-            for _, data in stats
-        ]
-        values = [value for value in values if value is not None]
-
-        if values:
-            baselines.append(f"{horizon}일 {sum(values) / len(values):.1f}%")
-
-    spans = [
-        data.get("기간") for _, data in stats if data.get("기간")
-    ]
-    chart_from = next(
-        (data.get("차트시작일") for _, data in stats if data.get("차트시작일")),
-        None,
-    )
-
-    if spans:
-        st.caption(
-            f"집계 구간: {spans[0][0]} ~ {spans[0][1]} "
-            f"(차트는 {chart_from} 이후만 그리므로, "
-            "차트에 없는 과거 신호는 '신호수(전체)'에만 포함됩니다)"
+    if len(pooled) > 1:
+        st.markdown("**전략 통합 (3종목 이상 합산)**")
+        st.dataframe(
+            pd.DataFrame(compare), hide_index=True, use_container_width=True
         )
+
+    baselines = {}
+
+    for _, _, data, _ in per_stock:
+        for item in data.get("요약", []):
+            if item.get("기준선") is not None:
+                baselines.setdefault(item["보유일수"], []).append(item["기준선"])
+
+    baseline_text = " / ".join(
+        f"{h}일 {np.mean(v):.1f}%" for h, v in sorted(baselines.items()) if v
+    )
 
     st.caption(
         "진입은 신호 다음 거래일 시가, 청산은 보유일수 뒤 종가 기준입니다. "
-        "기준선은 같은 규칙으로 전 구간 아무 날에나 진입했을 때의 상승 비율"
-        "(종목 평균)이며, 승률이 기준선을 넘지 못하면 신호에 우위가 없다는 뜻입니다."
-        + (f" · 기준선: {' / '.join(baselines)}" if baselines else "")
+        "쌍고점(매도)은 하락한 경우를 +로 계산했습니다. "
+        "기준선은 같은 규칙으로 아무 날에나 진입했을 때의 상승 비율이며, "
+        "승률이 기준선을 넘지 못하면 신호에 우위가 없다는 뜻입니다."
+        + (f" · 기준선: {baseline_text}" if baseline_text else "")
     )
 
     detail = []
 
-    for name, data in stats:
+    for name, label, data, _ in per_stock:
         for record in data.get("신호목록", []):
             detail.append({
                 "종목": name,
-                "폭등일": record.get("폭등일"),
-                "음봉일": record.get("음봉일"),
-                "음봉일수": record.get("음봉일수"),
-                "거래량배수": record.get("거래량배수"),
-                "급감비율(%)": record.get("급감비율"),
+                "전략": label,
+                "신호일": record.get("신호일") or record.get("음봉일"),
                 "진입일": record.get("진입일"),
                 "진입가": record.get("진입가"),
-                "차트표시": "표시" if record.get("차트표시") else "구간 밖",
                 **{
                     f"{horizon}일(%)": record.get(f"수익률{horizon}")
                     for horizon in horizons
@@ -1409,9 +1409,7 @@ def render_nomad_stats(results):
     if detail:
         with st.expander(f"신호별 상세 ({len(detail)}건)", expanded=False):
             st.dataframe(
-                pd.DataFrame(detail),
-                hide_index=True,
-                use_container_width=True,
+                pd.DataFrame(detail), hide_index=True, use_container_width=True
             )
 
 
@@ -2742,6 +2740,7 @@ def run_batch(
                     )
                 ),
                 "nomad_stats": analysis.get("nomad_stats") or {},
+                "double_stats": analysis.get("double_stats") or {},
                 "png_bytes": None,
                 "image_filename": None,
             }
