@@ -95,7 +95,16 @@ class FinancialDataManager:
         excel_file,
         sheet_name,
     ):
-        """분기, 목표가, 괴리율 컬럼을 추가합니다."""
+        """
+        분기, 목표가, 괴리율 컬럼을 추가합니다.
+
+        주의(정보 시점):
+        목표가는 '그 분기의 목표주가'를 분기 첫 거래일부터 배정합니다.
+        증권사 목표주가는 보통 그 분기 실적이 나온 뒤에 제시되므로,
+        분기 초반 행은 당시엔 알 수 없던 값을 보여주는 셈입니다.
+        이 값은 신호·수익률 계산에는 쓰이지 않고 화면 참고용으로만
+        쓰입니다. 백테스트 입력으로는 쓰지 마세요.
+        """
         df = df.copy()
 
         target_prices = FinancialDataManager.load_target_price(
@@ -227,13 +236,12 @@ class TechnicalIndicator:
         """
         주간 MACD를 추가합니다.
 
-        같은 주의 날짜에는 해당 주의 마지막 가용 종가로
-        계산한 동일한 주간 값을 배정합니다(표시용 값).
+        각 주의 날짜에는 '직전에 완료된 주봉'으로 계산한 값을
+        배정합니다. 그 주 자체의 금요일 종가는 쓰지 않으므로
+        주 초반에 미래 정보가 섞이지 않습니다.
 
-        주의:
-        이 값에는 그 주 후반 정보가 섞여 있으므로 신호 판정에는
-        쓰지 않습니다. 신호는 maintain_weekly_trend()에서
-        '직전 완료 주봉'만으로 다시 계산합니다.
+        표시값(Weekly_MACD 등)과 신호 판정이 같은 값을 쓰도록
+        여기서 한 칸 밀어(shift) 배정합니다.
         """
         weekly = (
             df[["종가"]]
@@ -261,6 +269,10 @@ class TechnicalIndicator:
         ]
 
         weekly = weekly[columns].copy()
+
+        # 완료된 주봉만 배정합니다. shift(1)을 하지 않으면 그 주 금요일
+        # 종가로 계산한 값이 같은 주 월~목요일에 이미 붙어 미래정보가 됩니다.
+        weekly[columns] = weekly[columns].shift(1)
         weekly.index = weekly.index.to_period("W-FRI")
 
         result = df.copy()
@@ -278,13 +290,9 @@ class TechnicalIndicator:
         """
         월간 MACD를 추가합니다.
 
-        같은 월의 날짜에는 해당 월의 마지막 가용 종가로
-        계산한 동일한 월간 값을 배정합니다(표시용 값).
-
-        주의:
-        이 값에는 그 월 후반 정보가 섞여 있으므로 신호 판정에는
-        쓰지 않습니다. 신호는 maintain_monthly_trend()에서
-        '직전 완료 월봉'만으로 다시 계산합니다.
+        각 월의 날짜에는 '직전에 완료된 월봉'으로 계산한 값을
+        배정합니다. 그 달 자체의 월말 종가는 쓰지 않으므로
+        월 초반에 미래 정보가 섞이지 않습니다.
         """
         monthly = (
             df[["종가"]]
@@ -312,6 +320,9 @@ class TechnicalIndicator:
         ]
 
         monthly = monthly[columns].copy()
+
+        # 완료된 월봉만 배정합니다(주간과 같은 이유).
+        monthly[columns] = monthly[columns].shift(1)
         monthly.index = monthly.index.to_period("M")
 
         result = df.copy()
@@ -383,9 +394,10 @@ class SignalGenerator:
 
         trend = SignalGenerator.calculate_trend(per_period)
 
-        # t[k]는 k주(월) 종가가 확정된 뒤에야 알 수 있으므로
-        # k+1주(월)부터 사용합니다.
-        known = trend.shift(1)
+        # 오실레이터는 add_weekly_macd/add_monthly_macd에서 이미
+        # '직전 완료 봉' 기준으로 한 칸 밀려 있으므로 여기서 또 밀지
+        # 않습니다(두 번 밀면 신호가 한 주기 늦어집니다).
+        known = trend
 
         df[label] = (
             known.reindex(periods)
