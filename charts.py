@@ -562,6 +562,24 @@ class ChartPlotter:
                 "고가",
                 1.10,
             ),
+            (
+                "이동평균매수",
+                "o",
+                "#b91c1c",
+                62,
+                "이동평균 매수 (MA5↑MA20)",
+                "저가",
+                0.955,
+            ),
+            (
+                "이동평균매도",
+                "o",
+                "#1e40af",
+                62,
+                "이동평균 매도 (MA5↓MA20)",
+                "고가",
+                1.045,
+            ),
         ]
 
         for (
@@ -682,6 +700,29 @@ class ChartPlotter:
                     ha="right",
                     va="bottom",
                 )
+
+        # 이동평균선(MA5/MA20)을 함께 그려 교차 신호를 눈으로 확인할 수 있게 합니다.
+        for column, color, label in (
+            ("MA5", "#f97316", "MA5"),
+            ("MA20", "#7c3aed", "MA20"),
+        ):
+            if column not in df.columns:
+                continue
+
+            values = to_numeric(df[column])
+
+            if values.notna().sum() == 0:
+                continue
+
+            ax.plot(
+                df.index,
+                values,
+                color=color,
+                linewidth=1.7,
+                alpha=0.95,
+                label=label,
+                zorder=4,
+            )
 
         ChartPlotter.plot_signals(ax, df)
 
