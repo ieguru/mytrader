@@ -88,6 +88,9 @@ _CHART_LOCK = threading.RLock()
 FINANCIAL_UNIT_LABEL = "엑셀 입력 단위"
 
 DISPLAY_MONTHS = 18
+
+MA_DISPARITY_FAST = 5     # 이격도 단기 기준
+MA_DISPARITY_SLOW = 20    # 이격도 장기 기준
 FINANCIAL_QUARTERS = 6
 
 DAILY_MACD_LINEWIDTH = 0.65
@@ -394,6 +397,120 @@ class ChartPlotter:
         return frame
 
     @staticmethod
+    def plot_disparity_panel(ax, df):
+        """이격도 패널: 종가 ÷ 이동평균 × 100"""
+        set_panel_style(
+            ax,
+            "4. 이격도 + RSI(30) — 매도 게이트: 이격도20≥100 · RSI30≥50",
+            "이격도 (%)",
+        )
+
+        if df is None or df.empty or "종가" not in df.columns:
+            panel_message(ax, "이격도 데이터가 없습니다.")
+            return
+
+        close = to_numeric(df["종가"])
+
+        plotted = False
+
+        for column, window, color, label, style, width in (
+            (f"이격도{MA_DISPARITY_SLOW}", 20, "#7c3aed", "이격도20", "-", 1.8),
+            (f"이격도{MA_DISPARITY_FAST}", 5, "#f97316", "이격도5", "--", 1.2),
+        ):
+            if column in df.columns:
+                values = to_numeric(df[column])
+            else:
+                values = (
+                    close
+                    / close.rolling(window, min_periods=window).mean()
+                    * 100
+                )
+
+            if values.notna().sum() == 0:
+                continue
+
+            ax.plot(
+                df.index,
+                values,
+                color=color,
+                linewidth=width,
+                linestyle=style,
+                alpha=0.95,
+                label=label,
+                zorder=4,
+            )
+
+            plotted = True
+
+        if not plotted:
+            panel_message(ax, "이격도를 계산할 수 없습니다.")
+            return
+
+        for level, color, style, width, alpha in (
+            (100.0, "#475569", "-", 1.1, 0.9),
+            (105.0, "#dc2626", ":", 1.0, 0.75),
+            (95.0, "#2563eb", ":", 1.0, 0.75),
+        ):
+            ax.axhline(
+                level,
+                color=color,
+                linestyle=style,
+                linewidth=width,
+                alpha=alpha,
+                zorder=2,
+            )
+
+        rsi_handles, rsi_labels = [], []
+
+        # RSI(30) 보조축 — 매도 게이트에 쓰는 지표
+        rsi_column = next(
+            (name for name in ("RSI30", f"RSI{MA_DISPARITY_SLOW}") if name in df.columns),
+            None,
+        )
+
+        if rsi_column is not None:
+            rsi_values = to_numeric(df[rsi_column])
+
+            if rsi_values.notna().sum() > 0:
+                twin = ax.twinx()
+
+                twin.plot(
+                    df.index,
+                    rsi_values,
+                    color="#0ea5e9",
+                    linewidth=1.3,
+                    alpha=0.85,
+                    label=rsi_column,
+                    zorder=3,
+                )
+
+                twin.axhline(
+                    50.0,
+                    color="#0ea5e9",
+                    linestyle=":",
+                    linewidth=1.0,
+                    alpha=0.7,
+                    zorder=2,
+                )
+
+                twin.set_ylim(0, 100)
+                twin.set_ylabel(rsi_column, fontsize=8, color="#0369a1")
+                twin.tick_params(axis="y", labelsize=7, colors="#0369a1")
+
+                rsi_handles, rsi_labels = twin.get_legend_handles_labels()
+
+        handle_list, label_list = ax.get_legend_handles_labels()
+
+        ax.legend(
+            handle_list + rsi_handles,
+            label_list + rsi_labels,
+            loc="upper left",
+            fontsize=8,
+            ncol=2,
+            framealpha=0.9,
+        )
+
+    @staticmethod
     def filter_recent_period(df):
         """실제 데이터의 최근 18개월을 반환합니다."""
         if df is None or df.empty:
@@ -567,7 +684,7 @@ class ChartPlotter:
                 "o",
                 "#b91c1c",
                 62,
-                "이동평균 매수 (MA5↑MA20·기울기 전환)",
+                "이동평균 매수 (MA5↑MA20)",
                 "저가",
                 0.955,
             ),
@@ -576,16 +693,25 @@ class ChartPlotter:
                 "o",
                 "#1e40af",
                 62,
-                "이동평균 매도 (음봉·MA5 이탈)",
+                "이동평균 매도 (음봉·이격도·RSI 또는 MA5↓MA20)",
                 "고가",
                 1.045,
+            ),
+            (
+                "이동평균매도이탈",
+                "v",
+                "#1e3a8a",
+                70,
+                "이동평균 매도 (MA5↓MA20 이탈)",
+                "고가",
+                1.075,
             ),
             (
                 "이동평균매수차단",
                 "x",
                 "#94a3b8",
                 58,
-                "이동평균 매수 차단 (MA20 기울기<0)",
+                "이동평균 매수 차단 (상단밴드 터치일)",
                 "저가",
                 0.955,
             ),
@@ -714,6 +840,7 @@ class ChartPlotter:
         for column, color, label, style, width in (
             ("MA5", "#f97316", "MA5", "-", 1.8),
             ("MA20", "#7c3aed", "MA20", "-", 1.7),
+            ("볼린저상한", "#94a3b8", "볼린저 상한", ":", 1.2),
         ):
             if column not in df.columns:
                 continue
@@ -891,7 +1018,7 @@ class ChartPlotter:
     ):
         set_panel_style(
             ax,
-            "4. 외국인·기관·개인 누적 순매수 수량"
+            "5. 외국인·기관·개인 누적 순매수 수량"
             f" — 누적 시작 {cumulative_start}",
             "누적 순매수 (주)",
         )
@@ -1032,7 +1159,7 @@ class ChartPlotter:
         """
         set_panel_style(
             ax,
-            "5. 분기 재무 — 분기 시작 위치 표시"
+            "6. 분기 재무 — 분기 시작 위치 표시"
             f" / 최근 {FINANCIAL_QUARTERS}개 분기"
             " + 엑셀 미래 전망",
             f"매출액\n({FINANCIAL_UNIT_LABEL})",
@@ -1886,17 +2013,18 @@ class ChartPlotter:
         axis_dates = actual_dates
 
         fig = plt.figure(
-            figsize=(18, 14)
+            figsize=(18, 16)
         )
 
         try:
             grid = fig.add_gridspec(
-                5,
+                6,
                 1,
                 height_ratios=[
                     2.5,
                     0.7,
                     1.15,
+                    0.95,
                     1.2,
                     1.65,
                 ],
@@ -1925,6 +2053,11 @@ class ChartPlotter:
                 sharex=ax1,
             )
 
+            ax6 = fig.add_subplot(
+                grid[5],
+                sharex=ax1,
+            )
+
             # 실제 시장 데이터만 전달합니다.
             ChartPlotter.plot_price_panel(
                 ax1,
@@ -1942,8 +2075,13 @@ class ChartPlotter:
                 plot_df,
             )
 
-            ChartPlotter.plot_investor_volume_panel(
+            ChartPlotter.plot_disparity_panel(
                 ax4,
+                plot_df,
+            )
+
+            ChartPlotter.plot_investor_volume_panel(
+                ax5,
                 plot_df,
                 cumulative_start,
             )
@@ -1953,7 +2091,7 @@ class ChartPlotter:
             try:
                 financial_dates = (
                     ChartPlotter.plot_financial_panel(
-                        ax5,
+                        ax6,
                         plot_df,
                         stock_name,
                         excel_file,
@@ -1977,16 +2115,16 @@ class ChartPlotter:
                     ):
                         extra_ax.remove()
 
-                ax5.clear()
+                ax6.clear()
 
                 set_panel_style(
-                    ax5,
-                    "5. 분기 재무",
+                    ax6,
+                    "6. 분기 재무",
                     FINANCIAL_UNIT_LABEL,
                 )
 
                 panel_message(
-                    ax5,
+                    ax6,
                     "재무 데이터를 표시하지 못했습니다.\n"
                     + str(error),
                 )
@@ -2010,6 +2148,7 @@ class ChartPlotter:
                     ax3,
                     ax4,
                     ax5,
+                    ax6,
                 ):
                     panel_ax.axvspan(
                         boundary,
@@ -2106,9 +2245,9 @@ class ChartPlotter:
                 for position in tick_positions
             ]
 
-            ax5.set_xticks(tick_positions)
+            ax6.set_xticks(tick_positions)
 
-            ax5.set_xticklabels(
+            ax6.set_xticklabels(
                 tick_labels,
                 rotation=25,
                 ha="right",
@@ -2125,7 +2264,7 @@ class ChartPlotter:
                     "거래일 — 모든 패널 동일 날짜 기준"
                 )
 
-            ax5.set_xlabel(
+            ax6.set_xlabel(
                 xlabel,
                 fontsize=9,
                 labelpad=3,
@@ -2149,7 +2288,7 @@ class ChartPlotter:
                 ax1,
                 ax2,
                 ax3,
-                ax4,
+                ax5,
             ):
                 panel_ax.tick_params(
                     axis="x",

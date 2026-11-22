@@ -1235,6 +1235,13 @@ MA_FAST = 5                # 매수 교차 단기선(5일선)
 MA_SLOW = 20               # 매수 교차 장기선(20일선)
 MA_SELL = 5                # 매도 기준선(5일선)
 MA_SLOPE_LOOKBACK = 1      # MA20 기울기 비교 간격(거래일)
+BOLL_PERIOD = 20           # 볼린저밴드 기간
+BOLL_K = 2.0               # 볼린저밴드 표준편차 배수
+BOLL_BLOCK_DAYS = 0        # 상단밴드 터치 당일만 매수 금지(0=당일, 1 이상=그 일수만큼 추가)
+RSI_SELL_PERIOD = 30       # 매도 게이트에 쓰는 RSI 기간
+SELL_MIN_DISP20 = 100.0    # 매도 조건: 이격도20 >= 이 값 (None 이면 미적용)
+SELL_MIN_RSI30 = 50.0      # 매도 조건: RSI(30) >= 이 값 (None 이면 미적용)
+MA20_BREAK_EXIT = True     # True 이면 MA5가 MA20을 하향 돌파할 때도 청산 (음봉 조건과 OR)
 
 
 def nomad_patterns(
@@ -2292,24 +2299,66 @@ def detect_nomad_sell(
 # 이동평균선 교차 (MA5 / MA20)
 # =========================================================
 
+def wilder_rsi(close, period=RSI_SELL_PERIOD):
+    """
+    Wilder 방식 RSI를 계산합니다.
+
+    상승분·하락분을 alpha=1/period 로 지수평활한 뒤
+    RSI = 100 - 100 / (1 + 평균상승 / 평균하락) 로 변환합니다.
+    상승·하락이 모두 없는 구간은 중립(50)으로 둡니다.
+    """
+    values = pd.to_numeric(close, errors="coerce")
+    delta = values.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+
+    average_gain = gain.ewm(
+        alpha=1.0 / period, adjust=False, min_periods=period
+    ).mean()
+    average_loss = loss.ewm(
+        alpha=1.0 / period, adjust=False, min_periods=period
+    ).mean()
+
+    ratio = average_gain / average_loss.replace(0, np.nan)
+    rsi = 100.0 - 100.0 / (1.0 + ratio)
+    rsi = rsi.where(~((average_gain == 0) & (average_loss == 0)), 50.0)
+
+    return rsi.fillna(50.0)
+
+
 def add_moving_average(
     df,
     fast=MA_FAST,
     slow=MA_SLOW,
     slope_lookback=MA_SLOPE_LOOKBACK,
     block_flat_slope=False,
+    block_declining_ma20=False,
     sell_ma=MA_SELL,
+    block_bollinger=False,
+    boll_period=BOLL_PERIOD,
+    boll_k=BOLL_K,
+    boll_block_days=BOLL_BLOCK_DAYS,
+    boll_block_until_middle=False,
+    sell_min_disp20=SELL_MIN_DISP20,
+    sell_min_rsi30=SELL_MIN_RSI30,
+    rsi_period=RSI_SELL_PERIOD,
+    ma20_break_exit=MA20_BREAK_EXIT,
 ):
     """
     단기·장기 단순이동평균과 교차 신호를 컬럼으로 추가합니다.
 
     규칙 (짝을 이룬 거래만 신호로 남깁니다)
         ① 매수: MA5가 MA20을 상향 돌파
-        ② 매수: MA5 > MA20 이면서 MA5 기울기가 음수에서 양수로 전환
-        ③ 매도: 음봉(종가 < 시가)이면서 종가 <= MA5
-           (MA5 기울기 조건은 사용하지 않습니다)
+        ② 매도: 음봉(종가 < 시가)이면서 종가 <= MA5
+           그리고 이격도20 >= sell_min_disp20 이고 RSI(30) >= sell_min_rsi30
+        ③ 매도(추세 이탈): 위 ② 조건과 무관하게, MA5가 MA20을 하향 돌파하면 청산합니다.
+           ma20_break_exit=False 이면 이 조건을 쓰지 않습니다.
         ④ 보유 중에는 매수 신호를 무시하고, 미보유 상태에서는 매도 신호를 무시합니다.
            (매수 → 매도 → 매수 → 매도 순서로만 짝이 만들어집니다)
+        ⑤ 매수 체결일(신호 다음 거래일)에는 매도 판정을 하지 않습니다.
+           사자마자 그날 종가로 청산되는 1일 매매를 막기 위해서입니다.
+        ⑥ (선택) block_bollinger=True 이면 볼린저 상단 터치일 매수를 금지합니다.
+           기본값은 사용하지 않습니다.
 
     기울기는 MA5[오늘] - MA5[1일 전] 으로 계산합니다.
     짝이 만들어지지 않은 원시 신호는 '이동평균매수원시'·'이동평균매도원시'에 남깁니다.
@@ -2340,6 +2389,10 @@ def add_moving_average(
 
     previous = above.shift(1)
 
+    # 이격도 = 종가 / 이동평균 * 100
+    frame[f"이격도{fast}"] = (close / fast_col * 100).where(fast_col.notna())
+    frame[f"이격도{slow}"] = (close / slow_col * 100).where(slow_col.notna())
+
     # MA5 기울기 (양수 전환 판정용)
     slope_fast = fast_col - fast_col.shift(1)
     frame[f"MA{fast}기울기"] = slope_fast
@@ -2353,48 +2406,123 @@ def add_moving_average(
     else:
         open_price = close
 
+    # 매수: MA5가 MA20을 상향 돌파한 날
     cross_up = (previous == 0) & (above == 1)
-    slope_turn_up = (slope_fast > 0) & (slope_fast.shift(1) <= 0)
-    rising_above = (above == 1) & slope_turn_up
+    buy_raw = cross_up.fillna(False)
 
-    buy_raw = (cross_up | rising_above).fillna(False)
-
+    # 매도: 음봉(종가 < 시가)이면서 종가가 MA5 이하
     bearish = close < open_price
-    sell_raw = (
-        bearish
-        & (close <= sell_ma_col)
-    ).fillna(False)
+    sell_basic = (bearish & (close <= sell_ma_col)).fillna(False)
 
-    blocked = slope.isna()
+    # 매도 게이트: 이격도20 하한 + RSI(30) 하한
+    # (20일선 위에 있고 RSI가 중립 위에 있을 때만 청산 → 추세 조정은 버팁니다)
+    rsi_values = wilder_rsi(close, rsi_period)
+    frame[f"RSI{rsi_period}"] = rsi_values
 
-    if block_flat_slope:
-        blocked = blocked | (slope <= 0)
+    sell_gate = pd.Series(True, index=frame.index)
+
+    if sell_min_disp20 is not None:
+        disparity_slow = pd.to_numeric(frame[f"이격도{slow}"], errors="coerce")
+        sell_gate &= (disparity_slow >= float(sell_min_disp20)).fillna(False)
+
+    if sell_min_rsi30 is not None:
+        sell_gate &= (rsi_values >= float(sell_min_rsi30)).fillna(False)
+
+    sell_raw = (sell_basic & sell_gate).fillna(False)
+
+    # 추세 이탈 청산: MA5가 MA20을 하향 돌파 (② 의 음봉·이격도·RSI 조건과 OR)
+    break_down = ((previous == 1) & (above == 0)).fillna(False)
+    if ma20_break_exit:
+        sell_exit = break_down
     else:
-        blocked = blocked | (slope < 0)
+        sell_exit = pd.Series(False, index=frame.index)
 
-    buy_signal = (buy_raw & ~blocked).fillna(False)
+    sell_trigger = (sell_raw | sell_exit).fillna(False)
+
+    blocked = pd.Series(False, index=frame.index)
+
+    if block_declining_ma20:
+        if block_flat_slope:
+            blocked = slope.isna() | (slope <= 0)
+        else:
+            blocked = slope.isna() | (slope < 0)
+
+    # 볼린저밴드: 상단 터치 이후 일정 기간 매수 금지
+    middle = close.rolling(boll_period, min_periods=boll_period).mean()
+    deviation = close.rolling(boll_period, min_periods=boll_period).std(ddof=0)
+    upper = middle + boll_k * deviation
+    lower = middle - boll_k * deviation
+
+    frame["볼린저중심"] = middle
+    frame["볼린저상한"] = upper
+    frame["볼린저하한"] = lower
+
+    if "고가" in frame.columns:
+        touch_price = pd.to_numeric(frame["고가"], errors="coerce")
+    else:
+        touch_price = close
+
+    touch = (touch_price >= upper).fillna(False).to_numpy()
+    boll_blocked = np.zeros(len(frame), dtype=bool)
+
+    if block_bollinger:
+        if boll_block_until_middle:
+            state = False
+
+            for position in range(len(frame)):
+                if touch[position]:
+                    state = True
+
+                if state and np.isfinite(middle.iat[position]):
+                    if close.iat[position] < middle.iat[position]:
+                        state = False
+
+                boll_blocked[position] = state
+        else:
+            for position in np.flatnonzero(touch):
+                end = position + max(boll_block_days, 0) + 1
+                boll_blocked[position:end] = True
+
+    boll_blocked_series = pd.Series(boll_blocked, index=frame.index)
+
+    frame["볼린저상한터치"] = touch.astype(int)
+    frame["볼린저차단"] = (buy_raw & ~blocked & boll_blocked_series).astype(int)
+
+    buy_signal = (buy_raw & ~blocked & ~boll_blocked_series).fillna(False)
 
     # 짝짓기: 보유 중 매수 무시, 미보유 중 매도 무시
     buy_paired = np.zeros(len(frame), dtype=int)
     sell_paired = np.zeros(len(frame), dtype=int)
 
     holding = False
+    entry_execution = None
 
     for position in range(len(frame)):
         if not holding:
             if buy_signal.iat[position]:
                 buy_paired[position] = 1
                 holding = True
+                # 매수는 신호 다음 거래일 시가 체결이므로, 그날까지는 매도 판정을 하지 않습니다.
+                entry_execution = position + 1
         else:
-            if sell_raw.iat[position]:
+            # 진입 당일(체결일)에 바로 청산되는 것을 막습니다.
+            if entry_execution is not None and position <= entry_execution:
+                continue
+
+            if sell_trigger.iat[position]:
                 sell_paired[position] = 1
                 holding = False
+                entry_execution = None
 
     frame["이동평균매수"] = buy_paired
     frame["이동평균매도"] = sell_paired
     frame["이동평균매수원시"] = buy_signal.astype(int)
     frame["이동평균매도원시"] = sell_raw.astype(int)
-    frame["이동평균매수차단"] = (buy_raw & blocked).astype(int)
+    frame["이동평균매도이탈"] = sell_exit.astype(int)
+    frame["이동평균매수차단"] = (
+        buy_raw & (blocked | boll_blocked_series)
+    ).astype(int)
+    frame["이동평균매도차단"] = (sell_basic & ~sell_gate).astype(int)
 
     return frame
 
