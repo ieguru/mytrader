@@ -1,15 +1,21 @@
-# 설치한 패키지
-node_modules/
+﻿# 가상환경 / 캐시
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
 
-# 환경변수와 비밀정보
+# 비밀 정보 (KRX 아이디·비밀번호)
+.streamlit/secrets.toml
 .env
-.env.*
-!.env.example
 
-# 빌드 결과 및 캐시
-dist/
-build/
-.next/
+# 강화학습 데이터·결과 (용량 큼, 다시 만들 수 있음)
+data/rl/
+output/
 
-# 로그
-*.log
+# 편집기
+.vs/
+.vscode/
+*.suo
+*.user

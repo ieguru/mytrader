@@ -1,8 +1,12 @@
 {
   "ExpandedNodes": [
     "",
-    "\\file"
+    "\\.streamlit",
+    "\\output",
+    "\\output\\rl",
+    "\\output\\rl\\stocks_dd",
+    "\\tests"
   ],
-  "SelectedNode": "\\file\\OCI홀딩스.xlsx",
+  "SelectedNode": "\\output\\rl\\stocks_dd",
   "PreviewInSolutionExplorer": false
 }
