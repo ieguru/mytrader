@@ -2280,12 +2280,14 @@ def make_chart_png(
     stock_name,
     excel_file=None,
     signals=None,
+    dpi=300,
 ):
     """
     최근 18개월 실제 데이터와 미래 분기 재무를
     포함한 5패널 차트를 PNG bytes로 반환합니다.
 
     signals: 표시할 신호 키 목록(None이면 전체).
+    dpi: 화면 미리보기는 낮은 값을 써서 다시 그리는 시간을 줄입니다.
     """
     with _CHART_LOCK:
         fig = None
@@ -2304,7 +2306,7 @@ def make_chart_png(
                 fig.savefig(
                     buffer,
                     format="png",
-                    dpi=300,
+                    dpi=dpi,
                     bbox_inches="tight",
                     facecolor="white",
                     transparent=False,

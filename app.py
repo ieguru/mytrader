@@ -49,11 +49,7 @@ del credential_value
 
 
 from analysis_engine import analyze_frame, recent_signals
-from charts import (
-    DEFAULT_SIGNALS,
-    make_chart_png,
-    signal_labels,
-)
+from charts import make_chart_png, signal_labels
 from data_collector import fetch_data
 
 import per_status
@@ -2177,67 +2173,114 @@ def render_trend_lights(latest):
         )
 
 
-CHART_SIGNAL_CACHE_LIMIT = 12
+CHART_SIGNAL_CACHE_LIMIT = 24
+
+# 화면에서 다시 그릴 때는 낮은 해상도를 씁니다(300dpi는 다운로드용).
+CHART_PREVIEW_DPI = 120
 
 
-def chart_signal_checkboxes(position, ticker):
+def signal_state_key(key):
+    return f"chart_signal_{key}"
+
+
+def init_chart_signals():
+    """체크 상태를 세션에 만들고 기본값(전체 선택)을 넣습니다."""
+    for key, _ in signal_labels():
+        st.session_state.setdefault(signal_state_key(key), True)
+
+
+def selected_chart_signals():
+    """체크된 신호 키 목록(화면 표시 순서)."""
+    init_chart_signals()
+
+    return [
+        key
+        for key, _ in signal_labels()
+        if st.session_state.get(signal_state_key(key), True)
+    ]
+
+
+def clear_chart_cache():
+    st.session_state.pop("chart_signal_cache", None)
+
+
+def render_chart_signal_selector():
     """
-    차트에 표시할 신호를 체크박스로 고릅니다(기본: 전체 선택).
+    왼쪽 '등록 종목' 창에 붙는 차트 신호 체크박스입니다.
 
-    체크 상태는 세션 동안 유지됩니다.
+    모든 종목의 종합차트에 공통으로 적용됩니다(기본: 전체 선택).
     """
-    selected = []
+    init_chart_signals()
 
-    with st.expander("차트 신호 표시 옵션", expanded=False):
-        st.caption(
-            "체크한 신호만 차트에 표시합니다. (기본: 전체 선택)"
+    st.markdown("#### 차트 신호 표시")
+
+    st.caption("체크한 신호만 차트에 표시합니다(전체 차트 공통).")
+
+    top_left, top_right = st.columns(2)
+
+    if top_left.button(
+        "전체 선택",
+        key="chart_signal_all",
+        use_container_width=True,
+    ):
+        for key, _ in signal_labels():
+            st.session_state[signal_state_key(key)] = True
+
+        clear_chart_cache()
+        st.rerun()
+
+    if top_right.button(
+        "전체 해제",
+        key="chart_signal_none",
+        use_container_width=True,
+    ):
+        for key, _ in signal_labels():
+            st.session_state[signal_state_key(key)] = False
+
+        clear_chart_cache()
+        st.rerun()
+
+    columns = st.columns(2)
+
+    for index, (key, label) in enumerate(signal_labels()):
+        columns[index % 2].checkbox(
+            label,
+            key=signal_state_key(key),
+            on_change=clear_chart_cache,
         )
 
-        columns = st.columns(2)
+    chosen = selected_chart_signals()
 
-        for index, (key, label) in enumerate(signal_labels()):
-            widget_key = f"chart_signal_{position}_{ticker}_{key}"
+    if len(chosen) == len(signal_labels()):
+        st.caption(f"표시: 전체 {len(chosen)}개")
 
-            if widget_key not in st.session_state:
-                st.session_state[widget_key] = True
+    elif chosen:
+        st.caption(f"표시: {len(chosen)}개 / {len(signal_labels())}개")
 
-            if columns[index % 2].checkbox(label, key=widget_key):
-                selected.append(key)
-
-        if st.button(
-            "전체 선택으로 되돌리기",
-            key=f"chart_signal_reset_{position}_{ticker}",
-        ):
-            for key, _ in signal_labels():
-                st.session_state[
-                    f"chart_signal_{position}_{ticker}_{key}"
-                ] = True
-
-            st.rerun()
-
-    return selected
+    else:
+        st.caption("표시: 없음 (캔들만)")
 
 
 def render_chart_with_signals(result, position, ticker, name):
     """
-    선택한 신호만 표시한 차트 bytes를 돌려줍니다.
+    체크한 신호만 표시한 차트 bytes를 돌려줍니다.
 
-    - 전체 선택: 분석 때 만든 원본 PNG를 그대로 씁니다.
+    - 전체 선택: 분석 때 만든 원본 PNG를 그대로 씁니다(가장 빠름).
     - 일부 선택: 그 종목의 분석 데이터로 다시 그립니다(세션 캐시).
-    - 스냅샷 복원 결과처럼 원본 데이터가 없으면 원본 PNG를 씁니다.
+    - 원본 데이터가 없으면(스냅샷 복원) 원본 PNG를 그대로 씁니다.
     """
-    selected = chart_signal_checkboxes(position, ticker)
+    selected = selected_chart_signals()
     original = result.get("png_bytes")
 
-    if selected == list(DEFAULT_SIGNALS):
+    if len(selected) == len(signal_labels()):
         return original
 
     frame = result.get("chart_data")
 
     if frame is None or getattr(frame, "empty", True):
         st.caption(
-            "저장된 스냅샷에는 원본 데이터가 없어 신호 선택을 "
-            "적용할 수 없습니다. 다시 분석하면 선택한 신호로 "
+            f"[{name}] 저장된 스냅샷에는 원본 데이터가 없어 신호 선택을 "
+            "적용할 수 없습니다. '분석 실행'을 하면 선택한 신호로 "
             "차트를 그립니다."
         )
         return original
@@ -2260,11 +2303,12 @@ def render_chart_with_signals(result, position, ticker, name):
                 else None
             ),
             signals=selected,
+            dpi=CHART_PREVIEW_DPI,
         )
 
     except Exception as error:
         st.warning(
-            f"선택한 신호로 차트를 다시 그리지 못했습니다: {error}"
+            f"[{name}] 선택한 신호로 차트를 다시 그리지 못했습니다: {error}"
         )
         return original
 
@@ -3198,6 +3242,11 @@ with st.sidebar:
         label="관심 그룹 편집 · 그룹 순서 변경",
         icon="🗂",
     )
+
+    st.divider()
+
+    render_chart_signal_selector()
+
 
     with st.form("batch_analysis_form"):
         selected_stocks = st.multiselect(
