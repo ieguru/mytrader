@@ -1,4 +1,4 @@
-# notifier.py
+﻿# notifier.py
 """
 배치 결과를 텔레그램으로 보냅니다.
 
@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import html
+import math
 import logging
 import time
 from dataclasses import dataclass, field
@@ -86,7 +87,7 @@ def format_price(value):
     try:
         number = float(value)
 
-        if number != number:  # NaN
+        if not math.isfinite(number):  # NaN/Infinity
             return "-"
 
         return f"{number:,.0f}"
@@ -98,7 +99,7 @@ def format_per(value):
     try:
         number = float(value)
 
-        if number != number:
+        if not math.isfinite(number):
             return "-"
 
         return f"{number:.1f}"

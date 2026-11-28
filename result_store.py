@@ -193,10 +193,8 @@ def make_preview(png_bytes, max_width=PREVIEW_MAX_WIDTH):
 
         if image.width > max_width:
             ratio = max_width / float(image.width)
-            image = image.resize(
-                (max_width, max(1, int(round(image.height * ratio)))),
-                Image.LANCZOS,
-            )
+            height = max(1, int(round(image.height * ratio)))
+            image = image.resize((max_width, height), Image.LANCZOS)
 
         chosen = b""
 
@@ -325,6 +323,15 @@ def restore_snapshot(payload, image_dir=None):
         if expected_days and latest.get("신호 조회 일수") != expected_days:
             raise SnapshotError(
                 "저장 결과의 신호 조회 기간이 현재 설정과 다릅니다."
+            )
+
+        if (
+            expected_limit
+            and latest.get("신호 개수 제한") is not None
+            and latest.get("신호 개수 제한") != expected_limit
+        ):
+            raise SnapshotError(
+                "저장 결과의 신호 개수 설정이 현재와 다릅니다."
             )
 
         image_bytes = None

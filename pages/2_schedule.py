@@ -1,4 +1,4 @@
-# pages/2_schedule.py
+﻿# pages/2_schedule.py
 """
 스케줄 설정 페이지 — 주기(매시간/매일/매주)와 시각을 정합니다.
 
@@ -9,7 +9,6 @@
 
 import json
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import streamlit as st
 

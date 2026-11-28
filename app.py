@@ -1,17 +1,13 @@
 ﻿# app.py
 
-import base64
 import io
 import json
-import math
 import numpy as np
 import os
-import re
 import uuid
 
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from html import escape
-from numbers import Integral, Real
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -544,26 +540,11 @@ def format_short_date(value):
 
 
 def to_finite_number(value):
-    """숫자 또는 쉼표 포함 문자열을 유한한 float로 변환합니다."""
-    if value is None:
-        return None
+    """숫자 또는 쉼표 포함 문자열을 유한한 float로 변환합니다.
 
-    try:
-        if isinstance(value, str):
-            value = value.replace(",", "").strip()
-
-            if not value:
-                return None
-
-        number = float(value)
-
-        if not math.isfinite(number):
-            return None
-
-        return number
-
-    except (TypeError, ValueError, OverflowError):
-        return None
+    계산 규칙은 per_status.to_finite_number 한 곳에서만 관리합니다.
+    """
+    return per_status.to_finite_number(value)
 
 
 # =========================================================
@@ -2526,54 +2507,11 @@ def json_data_to_dataframe(data):
 
 
 def json_safe(value):
+    """pandas/numpy 값을 JSON 저장 가능한 값으로 바꿉니다.
+
+    저장소(result_store)와 같은 규칙을 쓰도록 그쪽 구현에 위임합니다.
     """
-    pandas/numpy 값과 결측값을
-    엄격한 JSON으로 저장 가능한 형태로 바꿉니다.
-    """
-    if value is None or value is pd.NA or value is pd.NaT:
-        return None
-
-    if isinstance(value, dict):
-        return {
-            str(key): json_safe(item)
-            for key, item in value.items()
-        }
-
-    if isinstance(value, (list, tuple)):
-        return [
-            json_safe(item)
-            for item in value
-        ]
-
-    if isinstance(value, (datetime, date, pd.Timestamp)):
-        return value.isoformat()
-
-    if isinstance(value, bool):
-        return value
-
-    if isinstance(value, Integral):
-        return int(value)
-
-    if isinstance(value, Real):
-        number = float(value)
-
-        return (
-            number
-            if math.isfinite(number)
-            else None
-        )
-
-    if isinstance(value, str):
-        return value
-
-    # numpy scalar 등
-    if hasattr(value, "item"):
-        return json_safe(value.item())
-
-    raise TypeError(
-        "JSON으로 저장할 수 없는 자료형입니다: "
-        f"{type(value).__name__}"
-    )
+    return result_store.json_safe(value)
 
 
 # =========================================================

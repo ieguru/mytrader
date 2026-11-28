@@ -1,7 +1,7 @@
 ﻿# batch_daily.py
 """
 매일 정해진 시각에 모든 종목을 분석하는 배치입니다.
-(예: GitHub Actions cron 20:01 KST — .github/workflows/daily_analysis.yml)
+(예: GitHub Actions cron 20:01 KST — .github/workflows/daily-analysis.yml)
 
 산출물
     img/{종목명}_{YYYYMMDD}.png            종합차트(원본)

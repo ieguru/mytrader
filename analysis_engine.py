@@ -1781,7 +1781,9 @@ def detect_double_patterns(
 
             signal_index = find_confirmation(
                 second + pivot,
-                lambda index: np.isfinite(close[index]) and close[index] < neckline,
+                lambda index, neckline=neckline: (
+                    np.isfinite(close[index]) and close[index] < neckline
+                ),
             )
 
             if signal_index is None:
@@ -1833,7 +1835,9 @@ def detect_double_patterns(
 
             signal_index = find_confirmation(
                 second + pivot,
-                lambda index: np.isfinite(close[index]) and close[index] > neckline,
+                lambda index, neckline=neckline: (
+                    np.isfinite(close[index]) and close[index] > neckline
+                ),
             )
 
             if signal_index is None:
@@ -1847,6 +1851,82 @@ def detect_double_patterns(
             break
 
     return frame
+
+
+def _directional_baseline(open_price, close, horizons):
+    """
+    '아무 날에나 같은 규칙으로 진입했을 때'의 방향별 승률 기준선(%)입니다.
+
+    매수(+1)는 상승, 매도(-1)는 하락이 승리이므로 방향별로 따로 셉니다.
+    더블 패턴·이동평균 신호 통계가 같은 기준선을 쓰도록 한 곳에 모읍니다.
+    """
+    baselines = {1: {}, -1: {}}
+
+    for horizon in horizons:
+        samples = {1: [], -1: []}
+
+        for index in range(len(close) - horizon - 1):
+            entry = open_price[index + 1]
+            exit_price = close[index + horizon]
+
+            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
+                signed = (exit_price / entry - 1.0) - TRADING_COST_RATE
+                samples[1].append(signed > 0)
+                samples[-1].append(-signed - TRADING_COST_RATE > 0)
+
+        for key in (1, -1):
+            baselines[key][horizon] = (
+                round(float(np.mean(samples[key]) * 100), 1)
+                if samples[key]
+                else None
+            )
+
+    return baselines
+
+
+def _summarize_records(records, horizons, baselines):
+    """신호별 기록을 보유일수별 요약(승률·평균·중앙값·최선·최악·기준선·초과)으로 집계합니다."""
+    summary = []
+
+    for horizon in horizons:
+        values = [
+            record[f"수익률{horizon}"]
+            for record in records
+            if record[f"수익률{horizon}"] is not None
+        ]
+        baseline = baselines.get(horizon)
+
+        if not values:
+            summary.append({
+                "보유일수": horizon,
+                "표본": 0,
+                "승률": None,
+                "평균": None,
+                "중앙값": None,
+                "최선": None,
+                "최악": None,
+                "기준선": baseline,
+                "초과": None,
+            })
+            continue
+
+        win_rate = float(np.mean([value > 0 for value in values]) * 100)
+
+        summary.append({
+            "보유일수": horizon,
+            "표본": len(values),
+            "승률": round(win_rate, 1),
+            "평균": round(float(np.mean(values)), 2),
+            "중앙값": round(float(np.median(values)), 2),
+            "최선": round(float(max(values)), 2),
+            "최악": round(float(min(values)), 2),
+            "기준선": baseline,
+            "초과": (
+                None if baseline is None else round(win_rate - baseline, 1)
+            ),
+        })
+
+    return summary
 
 
 def add_double_signal(df, **kwargs):
@@ -1889,26 +1969,11 @@ def double_signal_stats(df, horizons=NOMAD_FORWARD_DAYS, **kwargs):
 
     # 기준선: 같은 진입 규칙으로 아무 날에나 진입했을 때의 승리 비율.
     # 매수는 '상승', 매도는 '하락'이 승리이므로 방향별로 따로 계산합니다.
-    base_by_direction = {1: {}, -1: {}}
-
-    for horizon in horizons:
-        samples = {1: [], -1: []}
-
-        for index in range(count - horizon - 1):
-            entry = open_price[index + 1]
-            exit_price = close[index + horizon]
-
-            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
-                signed = (exit_price / entry - 1.0) - TRADING_COST_RATE
-                samples[1].append(signed > 0)
-                samples[-1].append(-signed - TRADING_COST_RATE > 0)
-
-        for key in (1, -1):
-            base_by_direction[key][horizon] = (
-                round(float(np.mean(samples[key]) * 100), 1)
-                if samples[key]
-                else None
-            )
+    base_by_direction = _directional_baseline(
+        open_price,
+        close,
+        horizons,
+    )
 
     result = {"기간": empty["기간"], "보유기간": list(horizons)}
 
@@ -1953,29 +2018,7 @@ def double_signal_stats(df, horizons=NOMAD_FORWARD_DAYS, **kwargs):
 
             records.append(record)
 
-        summary = []
-
-        for horizon in horizons:
-            values = [r[f"수익률{horizon}"] for r in records if r[f"수익률{horizon}"] is not None]
-            summary.append({
-                "보유일수": horizon,
-                "표본": len(values),
-                "승률": None if not values else round(float(np.mean([v > 0 for v in values]) * 100), 1),
-                "평균": None if not values else round(float(np.mean(values)), 2),
-                "중앙값": None if not values else round(float(np.median(values)), 2),
-                "최선": None if not values else round(float(max(values)), 2),
-                "최악": None if not values else round(float(min(values)), 2),
-                "기준선": baselines.get(horizon),
-                "초과": (
-                    None
-                    if not values or baselines.get(horizon) is None
-                    else round(
-                        float(np.mean([v > 0 for v in values]) * 100)
-                        - baselines[horizon],
-                        1,
-                    )
-                ),
-            })
+        summary = _summarize_records(records, horizons, baselines)
 
         result[label] = {
             "신호수": len(records),
@@ -2440,26 +2483,11 @@ def ma_signal_stats(
     ]
 
     # 기준선: 방향별로 따로 계산 (매도는 '하락'이 승리)
-    base_by_direction = {1: {}, -1: {}}
-
-    for horizon in horizons:
-        samples = {1: [], -1: []}
-
-        for index in range(count - horizon - 1):
-            entry = open_price[index + 1]
-            exit_price = close[index + horizon]
-
-            if np.isfinite(entry) and np.isfinite(exit_price) and entry > 0:
-                signed = (exit_price / entry - 1.0) - TRADING_COST_RATE
-                samples[1].append(signed > 0)
-                samples[-1].append(-signed - TRADING_COST_RATE > 0)
-
-        for key in (1, -1):
-            base_by_direction[key][horizon] = (
-                round(float(np.mean(samples[key]) * 100), 1)
-                if samples[key]
-                else None
-            )
+    base_by_direction = _directional_baseline(
+        open_price,
+        close,
+        horizons,
+    )
 
     fast_col = f"MA{fast}"
     slow_col = f"MA{slow}"

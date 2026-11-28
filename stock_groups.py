@@ -21,7 +21,8 @@ import uuid
 from html import escape
 from pathlib import Path
 
-import pandas as pd
+DEFAULT_STOCKS_FILE = Path(__file__).resolve().parent / "stocks.txt"
+
 import streamlit as st
 
 
@@ -209,7 +210,7 @@ def save_watch_group(path, watch_stocks):
     )
 
 
-def render_group_reorder(group_name, items, key_prefix=""):
+def render_group_reorder(group_name, items, key_prefix="", stocks_file=None):
     """
     그룹 종목의 순서를 ↑ / ↓ 버튼으로 바꾸고
     즉시 stocks.txt에 저장합니다.
@@ -220,6 +221,8 @@ def render_group_reorder(group_name, items, key_prefix=""):
     if not items:
         st.info(f"[{group_name}] 그룹이 비어 있습니다.")
         return
+
+    path = Path(stocks_file) if stocks_file else DEFAULT_STOCKS_FILE
 
     safe_group = re.sub(
         r"\W+",
@@ -261,7 +264,7 @@ def render_group_reorder(group_name, items, key_prefix=""):
                 )
 
                 save_group_section(
-                    STOCKS_FILE,
+                    path,
                     group_name,
                     reordered,
                 )
@@ -282,7 +285,7 @@ def render_group_reorder(group_name, items, key_prefix=""):
                 )
 
                 save_group_section(
-                    STOCKS_FILE,
+                    path,
                     group_name,
                     reordered,
                 )
