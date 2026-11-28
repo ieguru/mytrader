@@ -1,4 +1,4 @@
-﻿# app.py
+﻿﻿# app.py
 
 import io
 import json
@@ -49,7 +49,11 @@ del credential_value
 
 
 from analysis_engine import analyze_frame, recent_signals
-from charts import make_chart_png
+from charts import (
+    DEFAULT_SIGNALS,
+    make_chart_png,
+    signal_labels,
+)
 from data_collector import fetch_data
 
 import per_status
@@ -2173,6 +2177,105 @@ def render_trend_lights(latest):
         )
 
 
+CHART_SIGNAL_CACHE_LIMIT = 12
+
+
+def chart_signal_checkboxes(position, ticker):
+    """
+    차트에 표시할 신호를 체크박스로 고릅니다(기본: 전체 선택).
+
+    체크 상태는 세션 동안 유지됩니다.
+    """
+    selected = []
+
+    with st.expander("차트 신호 표시 옵션", expanded=False):
+        st.caption(
+            "체크한 신호만 차트에 표시합니다. (기본: 전체 선택)"
+        )
+
+        columns = st.columns(2)
+
+        for index, (key, label) in enumerate(signal_labels()):
+            widget_key = f"chart_signal_{position}_{ticker}_{key}"
+
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = True
+
+            if columns[index % 2].checkbox(label, key=widget_key):
+                selected.append(key)
+
+        if st.button(
+            "전체 선택으로 되돌리기",
+            key=f"chart_signal_reset_{position}_{ticker}",
+        ):
+            for key, _ in signal_labels():
+                st.session_state[
+                    f"chart_signal_{position}_{ticker}_{key}"
+                ] = True
+
+            st.rerun()
+
+    return selected
+
+
+def render_chart_with_signals(result, position, ticker, name):
+    """
+    선택한 신호만 표시한 차트 bytes를 돌려줍니다.
+
+    - 전체 선택: 분석 때 만든 원본 PNG를 그대로 씁니다.
+    - 일부 선택: 그 종목의 분석 데이터로 다시 그립니다(세션 캐시).
+    - 스냅샷 복원 결과처럼 원본 데이터가 없으면 원본 PNG를 씁니다.
+    """
+    selected = chart_signal_checkboxes(position, ticker)
+    original = result.get("png_bytes")
+
+    if selected == list(DEFAULT_SIGNALS):
+        return original
+
+    frame = result.get("chart_data")
+
+    if frame is None or getattr(frame, "empty", True):
+        st.caption(
+            "저장된 스냅샷에는 원본 데이터가 없어 신호 선택을 "
+            "적용할 수 없습니다. 다시 분석하면 선택한 신호로 "
+            "차트를 그립니다."
+        )
+        return original
+
+    cache = st.session_state.setdefault("chart_signal_cache", {})
+    cache_key = (ticker, tuple(selected))
+
+    if cache_key in cache:
+        return cache[cache_key]
+
+    excel_path = FINANCIAL_DIR / f"{name}.xlsx"
+
+    try:
+        png_bytes = make_chart_png(
+            frame,
+            name,
+            excel_file=(
+                str(excel_path)
+                if excel_path.is_file()
+                else None
+            ),
+            signals=selected,
+        )
+
+    except Exception as error:
+        st.warning(
+            f"선택한 신호로 차트를 다시 그리지 못했습니다: {error}"
+        )
+        return original
+
+    cache[cache_key] = png_bytes
+
+    while len(cache) > CHART_SIGNAL_CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+
+    return png_bytes
+
+
 def render_stock_result(result, position):
     name = result["stock_name"]
     ticker = result["ticker"]
@@ -2354,7 +2457,12 @@ def render_stock_result(result, position):
 
     st.markdown("### 종합차트")
 
-    png_bytes = result.get("png_bytes")
+    png_bytes = render_chart_with_signals(
+        result,
+        position,
+        ticker,
+        name,
+    )
 
     if png_bytes:
         st.image(
@@ -2791,6 +2899,9 @@ def run_batch(
                 "ma_stats": analysis.get("ma_stats") or {},
                 "png_bytes": None,
                 "image_filename": None,
+                # 신호 선택 옵션으로 다시 그릴 때 쓰는 원본 프레임
+                # (스냅샷에는 저장하지 않습니다)
+                "chart_data": analysis["data"],
             }
 
         except Exception as error:

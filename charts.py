@@ -1,4 +1,4 @@
-﻿# charts.py
+﻿﻿# charts.py
 """
 5패널 종합차트를 고해상도 PNG bytes로 반환합니다.
 
@@ -104,6 +104,52 @@ VOLUME_COLUMNS = {
 # =========================================================
 # 공통 함수
 # =========================================================
+
+# =========================================================
+# 차트에 표시할 매매 신호 (키, 화면 라벨)
+# =========================================================
+
+SIGNAL_OPTIONS = (
+    ("Weekly_Buy", "주간 매수"),
+    ("Weekly_Sell", "주간 매도"),
+    ("Weekly_Monthly_Buy", "주간·월간 매수"),
+    ("Weekly_Monthly_Sell", "주간·월간 매도"),
+    ("유목민신호", "유목민 매수"),
+    ("유목민매도신호", "유목민 매도"),
+    ("이동평균매수", "이동평균 매수"),
+    ("이동평균매도", "이동평균 매도"),
+    ("이동평균매수차단", "이동평균 매수 차단"),
+    ("쌍바닥신호", "쌍바닥 매수"),
+    ("쌍고점신호", "쌍고점 매도"),
+)
+
+# 기본값: 전체 표시
+DEFAULT_SIGNALS = tuple(key for key, _ in SIGNAL_OPTIONS)
+
+
+def signal_labels():
+    """(키, 라벨) 목록을 돌려줍니다(화면 체크박스 순서)."""
+    return list(SIGNAL_OPTIONS)
+
+
+def normalize_signals(signals=None):
+    """
+    선택된 신호 키 집합으로 정규화합니다.
+
+    None      -> 전체 신호
+    빈 목록   -> 아무 신호도 표시하지 않음
+    모르는 키 -> 무시
+    """
+    if signals is None:
+        return set(DEFAULT_SIGNALS)
+
+    if isinstance(signals, str):
+        signals = [signals]
+
+    valid = {key for key, _ in SIGNAL_OPTIONS}
+
+    return {str(key) for key in signals} & valid
+
 
 def to_numeric(series):
     """숫자 문자열과 결측값을 정리합니다."""
@@ -506,7 +552,14 @@ class ChartPlotter:
         )
 
     @staticmethod
-    def plot_signals(ax, df):
+    def plot_signals(ax, df, signals=None):
+        """
+        매매 신호를 표시합니다.
+
+        signals가 None이면 전체 신호, 목록이면 그 키의 신호만 그립니다.
+        """
+        selected = normalize_signals(signals)
+
         specs = [
             (
                 "Weekly_Buy",
@@ -600,7 +653,7 @@ class ChartPlotter:
             price_column,
             factor,
         ) in specs:
-            if column not in df.columns:
+            if column not in selected or column not in df.columns:
                 continue
 
             signals = pd.to_numeric(
@@ -645,7 +698,7 @@ class ChartPlotter:
                 1.10,
             ),
         ):
-            if column not in df.columns:
+            if column not in selected or column not in df.columns:
                 continue
 
             signals = pd.to_numeric(df[column], errors="coerce")
@@ -667,7 +720,7 @@ class ChartPlotter:
             )
 
     @staticmethod
-    def plot_price_panel(ax, df, stock_name):
+    def plot_price_panel(ax, df, stock_name, signals=None):
         set_panel_style(
             ax,
             f"1. {stock_name} — 주가·목표가·매매 신호"
@@ -734,7 +787,7 @@ class ChartPlotter:
                 zorder=4,
             )
 
-        ChartPlotter.plot_signals(ax, df)
+        ChartPlotter.plot_signals(ax, df, signals=signals)
 
         handles, labels = (
             ax.get_legend_handles_labels()
@@ -1840,6 +1893,7 @@ class ChartPlotter:
         save_chart=False,
         interactive=False,
         img_dir="img",
+        signals=None,
     ):
         """
         5패널 Figure를 생성합니다.
@@ -1852,6 +1906,10 @@ class ChartPlotter:
 
         interactive:
             기존 외부 호출과의 호환용 인자입니다.
+
+        signals:
+            차트에 표시할 신호 키 목록(charts.SIGNAL_OPTIONS).
+            None이면 전체 신호를 표시합니다.
         """
         ChartPlotter.setup_korean_font()
 
@@ -1930,6 +1988,7 @@ class ChartPlotter:
                 ax1,
                 plot_df,
                 stock_name,
+                signals=signals,
             )
 
             ChartPlotter.plot_volume_panel(
@@ -2220,10 +2279,13 @@ def make_chart_png(
     df,
     stock_name,
     excel_file=None,
+    signals=None,
 ):
     """
     최근 18개월 실제 데이터와 미래 분기 재무를
     포함한 5패널 차트를 PNG bytes로 반환합니다.
+
+    signals: 표시할 신호 키 목록(None이면 전체).
     """
     with _CHART_LOCK:
         fig = None
@@ -2235,6 +2297,7 @@ def make_chart_png(
                 excel_file=excel_file,
                 save_chart=False,
                 interactive=False,
+                signals=signals,
             )
 
             with io.BytesIO() as buffer:
