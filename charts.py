@@ -1,4 +1,4 @@
-﻿﻿# charts.py
+﻿# charts.py
 """
 5패널 종합차트를 고해상도 PNG bytes로 반환합니다.
 
